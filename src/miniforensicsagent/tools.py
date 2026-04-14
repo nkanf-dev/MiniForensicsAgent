@@ -8,9 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-ALLOWED_BASH = {"pwd", "ls", "find", "cat", "grep", "head", "xargs"}
 DEFAULT_READ_LIMIT = 80
-FORBIDDEN_BASH_SNIPPETS = {"rm ", "mv ", "cp ", "chmod ", "chown ", "curl ", "wget ", "python ", "python3 ", "node ", "npm ", "sh ", "bash ", ">>", " >", "< "}
 
 
 def expand_brace_pattern(pattern: str) -> list[str]:
@@ -114,7 +112,7 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
             patterns = [item.replace(".*", "*") for item in expand_brace_pattern(str(args["pattern"]))]
             matches: list[str] = []
             for pattern in patterns:
-                completed = subprocess.run(["rg", "--files", str(root), "-g", pattern], cwd=workspace, capture_output=True, text=True, timeout=10, check=False)
+                completed = subprocess.run(["rg", "--files", str(root), "-g", pattern], cwd=workspace, capture_output=True, text=True, timeout=180, check=False)
                 for line in completed.stdout.splitlines():
                     line = line.strip()
                     if not line:
@@ -142,7 +140,7 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
             for glob_pattern in glob_patterns:
                 rg_cmd.extend(["-g", glob_pattern])
             rg_cmd.append(str(root))
-            completed = subprocess.run(rg_cmd, cwd=workspace, capture_output=True, text=True, timeout=10, check=False)
+            completed = subprocess.run(rg_cmd, cwd=workspace, capture_output=True, text=True, timeout=180, check=False)
             matches: list[dict[str, Any]] = []
             for line in completed.stdout.splitlines():
                 parts = line.split(":", 2)
@@ -182,13 +180,8 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
 
         if tool == "Bash":
             command = str(args["command"]).strip()
-            parts = shlex.split(command)
-            if not parts or parts[0] not in ALLOWED_BASH:
-                return {"ok": False, "error": f"Command not allowed: {command}"}
-            lowered = f" {command.lower()} "
-            if any(snippet in lowered for snippet in FORBIDDEN_BASH_SNIPPETS):
-                return {"ok": False, "error": f"Command not allowed: {command}"}
-            completed = subprocess.run(command, cwd=workspace, shell=True, capture_output=True, text=True, timeout=10, check=False)
+            _parts = shlex.split(command)
+            completed = subprocess.run(command, cwd=workspace, shell=True, capture_output=True, text=True, timeout=180, check=False)
             output = completed.stdout.strip()
             if completed.stderr.strip():
                 output = f"{output}\n{completed.stderr.strip()}".strip()
