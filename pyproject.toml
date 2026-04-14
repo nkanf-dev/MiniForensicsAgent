@@ -1,0 +1,20 @@
+[project]
+name = "MiniForensicsAgent"
+version = "0.1.0"
+description = "A small local forensics-style codebase explorer for MLX models"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "effgen[mlx]",
+    "rich",
+]
+
+[project.scripts]
+mini-forensics-agent = "miniforensicsagent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/miniforensicsagent"]

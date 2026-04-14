@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /Users/nkanf/MiniForensicsAgent
+exec uv run mini-forensics-agent "$@"
