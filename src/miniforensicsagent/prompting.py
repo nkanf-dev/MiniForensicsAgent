@@ -57,7 +57,7 @@ Do not call a tool on the first turn.
     return f"""You are a local codebase explorer.
 Use Claude Code style tool calls.
 Return exactly one thing each turn:
-- <tool_call>{{"name":"Glob","arguments":{{"pattern":"**/*.sqlite","path":"."}}}}</tool_call>
+- <tool_call>{{"name":"Glob","arguments":{{"pattern":"**/*.js","path":"."}}}}</tool_call>
 - or {{"type":"rubric","strong_evidence":["short item"],"weak_evidence":["short item"],"finish_when":"one short sentence"}}
 - or <final>{{"answer":"done"}}</final>
 No prose.

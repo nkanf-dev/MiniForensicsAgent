@@ -18,6 +18,9 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=768)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--reflection-strength", choices=["none", "low", "medium", "high"], default="medium")
+    parser.add_argument("--kv-bits", type=int, default=None)
+    parser.add_argument("--kv-group-size", type=int, default=None)
+    parser.add_argument("--quantized-kv-start", type=int, default=None)
     parser.add_argument("--task", required=True)
     parser.add_argument("--json-out", default="")
     parser.add_argument("--stream", action="store_true")
@@ -44,6 +47,9 @@ def main() -> int:
         temperature=args.temperature,
         stream_output=args.stream,
         reflection_strength=args.reflection_strength,
+        kv_bits=args.kv_bits,
+        kv_group_size=args.kv_group_size,
+        quantized_kv_start=args.quantized_kv_start,
     )
     payload = {
         "model": selected.name,
@@ -54,6 +60,11 @@ def main() -> int:
         "tool_calls": result.tool_calls,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "workspace": str(workspace),
+        "kv_cache_quantization": {
+            "kv_bits": args.kv_bits,
+            "kv_group_size": args.kv_group_size,
+            "quantized_kv_start": args.quantized_kv_start,
+        },
         "transcript": result.transcript,
     }
     if args.json_out:

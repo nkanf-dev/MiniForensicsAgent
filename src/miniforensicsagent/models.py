@@ -123,8 +123,109 @@ def patch_mlx_lm_generate_for_effgen() -> None:
     generate_module.stream_generate = compatible_stream_generate
 
 
+def patch_effgen_mlx_engine_for_kv_cache() -> None:
+    try:
+        from effgen.models.mlx_engine import MLXEngine
+        from effgen.models.base import GenerationConfig
+        from mlx_lm import generate as mlx_generate
+        from mlx_lm import stream_generate as mlx_stream_generate
+    except Exception:
+        return
+
+    if getattr(MLXEngine, "_mini_forensics_agent_kv_patch", False):
+        return
+
+    def _config_kv_kwargs(config: GenerationConfig) -> dict:
+        kv_kwargs: dict = {}
+        for name in ("kv_bits", "kv_group_size", "quantized_kv_start"):
+            value = getattr(config, name, None)
+            if value is not None:
+                kv_kwargs[name] = value
+        return kv_kwargs
+
+    def generate(self, prompt: str, config: GenerationConfig | None = None, system_prompt: str | None = None, skip_chat_template: bool = False, **kwargs):
+        if not self._is_loaded:
+            raise RuntimeError("Model is not loaded. Call load() first.")
+        if config is None:
+            config = GenerationConfig()
+        formatted_prompt = self._format_prompt_with_chat_template(prompt, system_prompt) if not skip_chat_template else prompt
+        self.validate_prompt(formatted_prompt)
+        gen_kwargs: dict[str, object] = {
+            "max_tokens": config.max_tokens or 512,
+            "temp": config.temperature,
+            "top_p": config.top_p,
+            "repetition_penalty": config.repetition_penalty,
+            **_config_kv_kwargs(config),
+            **kwargs,
+        }
+        if config.seed is not None:
+            gen_kwargs["seed"] = config.seed
+        generated_text = mlx_generate(self.model, self.tokenizer, prompt=formatted_prompt, verbose=False, **gen_kwargs)
+        if config.stop_sequences:
+            for stop_seq in config.stop_sequences:
+                if stop_seq in generated_text:
+                    generated_text = generated_text[: generated_text.index(stop_seq)]
+                    break
+        prompt_tokens = len(self.tokenizer.encode(formatted_prompt))
+        completion_tokens = len(self.tokenizer.encode(generated_text))
+        from effgen.models.base import GenerationResult
+
+        metadata = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "chat_template_applied": not skip_chat_template and self.apply_chat_template,
+            "engine": "mlx",
+        }
+        metadata.update(_config_kv_kwargs(config))
+        return GenerationResult(
+            text=generated_text,
+            tokens_used=completion_tokens,
+            finish_reason="stop",
+            model_name=self.model_name,
+            metadata=metadata,
+        )
+
+    def generate_stream(self, prompt: str, config: GenerationConfig | None = None, system_prompt: str | None = None, skip_chat_template: bool = False, **kwargs):
+        if not self._is_loaded:
+            raise RuntimeError("Model is not loaded. Call load() first.")
+        if config is None:
+            config = GenerationConfig()
+        formatted_prompt = self._format_prompt_with_chat_template(prompt, system_prompt) if not skip_chat_template else prompt
+        self.validate_prompt(formatted_prompt)
+        gen_kwargs: dict[str, object] = {
+            "max_tokens": config.max_tokens or 512,
+            "temp": config.temperature,
+            "top_p": config.top_p,
+            "repetition_penalty": config.repetition_penalty,
+            **_config_kv_kwargs(config),
+            **kwargs,
+        }
+        if config.seed is not None:
+            gen_kwargs["seed"] = config.seed
+        for response in mlx_stream_generate(self.model, self.tokenizer, prompt=formatted_prompt, **gen_kwargs):
+            if isinstance(response, dict):
+                text = response.get("text", "")
+            elif hasattr(response, "text"):
+                text = response.text
+            else:
+                text = str(response)
+            if text:
+                if config.stop_sequences:
+                    for stop_seq in config.stop_sequences:
+                        if stop_seq in text:
+                            yield text[: text.index(stop_seq)]
+                            return
+                yield text
+
+    MLXEngine.generate = generate  # type: ignore[assignment]
+    MLXEngine.generate_stream = generate_stream  # type: ignore[assignment]
+    MLXEngine._mini_forensics_agent_kv_patch = True  # type: ignore[attr-defined]
+
+
 def prepare_effgen_imports():
     patch_mlx_lm_generate_for_effgen()
+    patch_effgen_mlx_engine_for_kv_cache()
     try:
         from effgen import GenerationConfig, load_model
     except Exception as exc:

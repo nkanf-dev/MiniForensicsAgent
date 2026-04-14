@@ -186,7 +186,7 @@ def is_blocking_failure_for_final(observation: dict[str, Any]) -> bool:
     return not observation.get("controller_guidance", False)
 
 
-def run_loop(model: Any, generation_config: Any, *, task: str, workspace: Path, max_iterations: int, max_tokens: int, temperature: float, stream_output: bool, reflection_strength: str) -> LoopResult:
+def run_loop(model: Any, generation_config: Any, *, task: str, workspace: Path, max_iterations: int, max_tokens: int, temperature: float, stream_output: bool, reflection_strength: str, kv_bits: int | None = None, kv_group_size: int | None = None, quantized_kv_start: int | None = None) -> LoopResult:
     transcript: list[dict[str, Any]] = []
     tool_calls = 0
     evidence_cache: dict[str, dict[str, Any]] = {}
@@ -220,6 +220,12 @@ def run_loop(model: Any, generation_config: Any, *, task: str, workspace: Path, 
 
         prompt = build_prompt(task, transcript, workspace, rubric=rubric or default_evidence_rubric(), remaining_iterations=max_iterations - iteration + 1, reflection_hint=reflection_hint)
         config = generation_config(temperature=temperature, max_tokens=max_tokens, top_p=0.9)
+        if kv_bits is not None:
+            setattr(config, "kv_bits", kv_bits)
+        if kv_group_size is not None:
+            setattr(config, "kv_group_size", kv_group_size)
+        if quantized_kv_start is not None:
+            setattr(config, "quantized_kv_start", quantized_kv_start)
         if stream_output:
             tokenizer = getattr(model, "tokenizer", None)
             prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
