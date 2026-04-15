@@ -6,7 +6,14 @@ import time
 from pathlib import Path
 
 from .loop import run_loop
-from .models import DEFAULT_AGENT_WORKSPACE, DEFAULT_MODEL_ROOT, discover_models, load_local_model, resolve_model
+from .models import (
+    DEFAULT_AGENT_WORKSPACE,
+    DEFAULT_MODEL_ROOT,
+    discover_models,
+    load_local_model,
+    patch_mlx_lm_prompt_cache_with_turboquant,
+    resolve_model,
+)
 
 
 def main() -> int:
@@ -21,10 +28,17 @@ def main() -> int:
     parser.add_argument("--kv-bits", type=int, default=None)
     parser.add_argument("--kv-group-size", type=int, default=None)
     parser.add_argument("--quantized-kv-start", type=int, default=None)
+    parser.add_argument("--turboquant", action="store_true")
+    parser.add_argument("--tq-r-bits", type=int, default=4)
+    parser.add_argument("--tq-theta-bits", type=int, default=4)
     parser.add_argument("--task", required=True)
     parser.add_argument("--json-out", default="")
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--list-models", action="store_true")
+    # Experimental features
+    parser.add_argument("--compress-observations", action="store_true", help="[exp] Compress old observation payloads to reduce prompt size (O(n²) → O(n) tokens).")
+    parser.add_argument("--transcript-window", type=int, default=None, metavar="K", help="[exp] Only include the last K turns in each prompt (sliding window).")
+    parser.add_argument("--multi-tool", action="store_true", help="[exp] Allow multiple independent tool calls per turn.")
     args = parser.parse_args()
 
     root = Path(args.model_root).expanduser().resolve()
@@ -37,6 +51,8 @@ def main() -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     started = time.perf_counter()
     model, generation_config = load_local_model(selected.path)
+    if args.turboquant:
+        patch_mlx_lm_prompt_cache_with_turboquant(r_bits=args.tq_r_bits, theta_bits=args.tq_theta_bits)
     result = run_loop(
         model,
         generation_config,
@@ -50,6 +66,9 @@ def main() -> int:
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
         quantized_kv_start=args.quantized_kv_start,
+        compress_observations=args.compress_observations,
+        transcript_window=args.transcript_window,
+        multi_tool=args.multi_tool,
     )
     payload = {
         "model": selected.name,
@@ -64,6 +83,11 @@ def main() -> int:
             "kv_bits": args.kv_bits,
             "kv_group_size": args.kv_group_size,
             "quantized_kv_start": args.quantized_kv_start,
+        },
+        "turboquant_kv_cache": {
+            "enabled": bool(args.turboquant),
+            "r_bits": args.tq_r_bits,
+            "theta_bits": args.tq_theta_bits,
         },
         "transcript": result.transcript,
     }
