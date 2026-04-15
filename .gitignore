@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .python-version
 smoke.json
+.mini_forensics_history.jsonl
+.mini_forensics_conversations.json
+.mini_forensics_spill/
+reports_*.json

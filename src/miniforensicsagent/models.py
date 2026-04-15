@@ -223,6 +223,52 @@ def patch_effgen_mlx_engine_for_kv_cache() -> None:
     MLXEngine._mini_forensics_agent_kv_patch = True  # type: ignore[attr-defined]
 
 
+def patch_mlx_lm_prompt_cache_with_turboquant(*, r_bits: int = 4, theta_bits: int = 4) -> None:
+    """
+    Optional backend: TurboQuant KV cache compression.
+
+    This follows turboquant-mlx's recommended integration by monkey-patching
+    mlx_lm.models.cache.make_prompt_cache.
+    """
+    TurboQuantKVCache = None
+    import_error: Exception | None = None
+    for mod, attr in (
+        ("turboquant_mlx.mlx_kvcache", "TurboQuantKVCache"),
+        ("turboquant_mlx.mlx_kv_cache", "TurboQuantKVCache"),
+        ("turboquant_mlx", "TurboQuantKVCache"),
+    ):
+        try:
+            module = __import__(mod, fromlist=[attr])
+            TurboQuantKVCache = getattr(module, attr)
+            break
+        except Exception as exc:  # pragma: no cover - depends on installed turboquant layout
+            import_error = exc
+
+    if TurboQuantKVCache is None:
+        raise RuntimeError(
+            "TurboQuant backend requested, but TurboQuant KV cache class could not be imported.\n"
+            "Install optional deps with:\n"
+            "  uv sync --extra turboquant\n"
+            "or\n"
+            "  uv pip install -e '.[turboquant]'\n"
+            "If turboquant is installed but still failing, you're likely on a minimal PyPI build that "
+            "does not ship the mlx-lm cache integration. Error: "
+            f"{type(import_error).__name__ if import_error else 'Unknown'}: {import_error}"
+        )
+
+    import mlx_lm.models.cache as cache_module
+
+    if getattr(cache_module, "_mini_forensics_agent_turboquant_patch", False):
+        return
+
+    def turboquant_make_prompt_cache(model, max_kv_size=None):  # noqa: ARG001
+        num_layers = len(getattr(model, "layers", []))
+        return [TurboQuantKVCache(r_bits=r_bits, theta_bits=theta_bits) for _ in range(num_layers)]
+
+    cache_module.make_prompt_cache = turboquant_make_prompt_cache  # type: ignore[assignment]
+    cache_module._mini_forensics_agent_turboquant_patch = True  # type: ignore[attr-defined]
+
+
 def prepare_effgen_imports():
     patch_mlx_lm_generate_for_effgen()
     patch_effgen_mlx_engine_for_kv_cache()
