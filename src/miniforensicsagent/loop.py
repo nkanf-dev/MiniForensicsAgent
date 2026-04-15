@@ -6,13 +6,10 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .evidence import (
-    EvidenceRubric,
-    default_evidence_rubric,
     has_promising_but_incomplete_candidate,
-    parse_evidence_rubric,
     update_evidence_cache,
 )
 from .prompting import build_prompt
@@ -30,6 +27,91 @@ class LoopResult:
     iterations: int
     tool_calls: int
     transcript: list[dict[str, Any]]
+
+
+def default_plan_state() -> dict[str, Any]:
+    return {
+        "goal": "find one reliable answer",
+        "steps": ["discover candidate files", "verify runtime usage", "finish with evidence-backed conclusion"],
+        "done_when": "one answer is supported by trusted evidence",
+        "completed_steps": [],
+        "current_step": "discover candidate files",
+    }
+
+
+def parse_plan_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    fallback = default_plan_state()
+    goal = str(payload.get("goal", "")).strip() or fallback["goal"]
+    raw_steps = payload.get("steps")
+    if not isinstance(raw_steps, list) or not raw_steps:
+        steps = list(fallback["steps"])
+    else:
+        steps = [str(step).strip() for step in raw_steps if str(step).strip()][:8]
+        if not steps:
+            steps = list(fallback["steps"])
+    done_when = str(payload.get("done_when", "")).strip() or fallback["done_when"]
+    completed_raw = payload.get("completed_steps")
+    completed_steps = [str(step).strip() for step in completed_raw] if isinstance(completed_raw, list) else []
+    current_step = str(payload.get("current_step", "")).strip() or (steps[0] if steps else "")
+    normalized_completed = [step for step in completed_steps if step in steps]
+    return {
+        "goal": goal,
+        "steps": steps,
+        "done_when": done_when,
+        "completed_steps": normalized_completed,
+        "current_step": current_step,
+    }
+
+
+def summarize_evidence(cache: dict[str, dict[str, Any]], *, limit: int = 6) -> list[dict[str, Any]]:
+    summary: list[dict[str, Any]] = []
+    for value, payload in cache.items():
+        if value == "__symbols__" or payload.get("artifact_type") != "candidate":
+            continue
+        evidence = payload.get("evidence", [])
+        trusted_usage = sum(1 for item in evidence if item.get("trusted") and item.get("role") in {"usage", "success"})
+        trusted_value = sum(1 for item in evidence if item.get("trusted") and item.get("role") == "value")
+        score = trusted_usage * 3 + trusted_value
+        if score <= 0:
+            continue
+        summary.append(
+            {
+                "value": value,
+                "score": score,
+                "trusted_usage_hits": trusted_usage,
+                "trusted_value_hits": trusted_value,
+            }
+        )
+    summary.sort(key=lambda item: item["score"], reverse=True)
+    return summary[:limit]
+
+
+def compute_tool_stats(transcript: list[dict[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    failures = 0
+    for turn in transcript:
+        decision = turn.get("decision", {})
+        if decision.get("type") == "tool":
+            name = str(decision.get("name", "tool"))
+            counts[name] = counts.get(name, 0) + 1
+        for observation in turn.get("observations", []):
+            if observation.get("ok") is False:
+                failures += 1
+    return {"counts": counts, "failures": failures}
+
+
+def _update_tool_stats(stats: dict[str, Any], turn: dict[str, Any]) -> None:
+    """Incrementally update running tool stats with one turn."""
+    decision = turn.get("decision", {})
+    # Support both single decision and multi_tool decisions list.
+    decisions = turn.get("decisions", [decision] if decision else [])
+    for dec in decisions:
+        if dec.get("type") == "tool":
+            name = str(dec.get("name", "tool"))
+            stats["counts"][name] = stats["counts"].get(name, 0) + 1
+    for obs in turn.get("observations", []):
+        if obs.get("ok") is False:
+            stats["failures"] += 1
 
 
 def extract_tagged_json(text: str, tag: str) -> dict[str, Any] | None:
@@ -65,10 +147,30 @@ def extract_first_json_object(text: str) -> dict[str, Any]:
     raise ValueError(f"No JSON object found in model output: {text[:300]}")
 
 
+def extract_all_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Extract all <tool_call> blocks from text (for multi_tool mode)."""
+    calls = []
+    for match in re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, flags=re.DOTALL):
+        try:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, dict):
+                calls.append(parsed)
+        except json.JSONDecodeError:
+            pass
+    return calls
+
+
 def normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("type") == "plan" or {"goal", "steps", "done_when"} <= set(payload.keys()):
+        return {"type": "plan", "plan": parse_plan_payload(payload)}
+    if payload.get("type") == "plan_update":
+        return {"type": "plan_update", "plan": parse_plan_payload(payload)}
     if payload.get("type") == "rubric" or {"strong_evidence", "weak_evidence", "finish_when"} <= set(payload.keys()):
-        parsed = parse_evidence_rubric(payload)
-        return {"type": "rubric", "strong_evidence": parsed.strong_evidence, "weak_evidence": parsed.weak_evidence, "finish_when": parsed.finish_when}
+        # Backward compatibility: map rubric -> plan.
+        goal = str(payload.get("finish_when", "finish with trusted evidence"))
+        steps = [f"collect strong evidence: {item}" for item in payload.get("strong_evidence", [])] or default_plan_state()["steps"]
+        mapped = {"goal": goal, "steps": steps, "done_when": goal}
+        return {"type": "plan", "plan": parse_plan_payload(mapped)}
     if payload.get("type") == "final" or payload.get("action") == "final":
         return {"type": "final", "answer": str(payload.get("answer", payload.get("summary", "done")))}
     name = payload.get("name") or payload.get("tool") or payload.get("action")
@@ -106,95 +208,81 @@ def looks_like_narrow_search(decision: dict[str, Any]) -> bool:
     return False
 
 
-def same_read_window(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    if left.get("type") != "tool" or right.get("type") != "tool" or left.get("name") != "Read" or right.get("name") != "Read":
-        return False
-    left_args = left.get("arguments", {})
-    right_args = right.get("arguments", {})
-    return str(left_args.get("file_path", "")) == str(right_args.get("file_path", "")) and int(left_args.get("offset", left_args.get("start_line", 1))) == int(right_args.get("offset", right_args.get("start_line", 1))) and int(left_args.get("limit", left_args.get("max_lines", DEFAULT_READ_LIMIT))) == int(right_args.get("limit", right_args.get("max_lines", DEFAULT_READ_LIMIT)))
-
-
-def expanding_read_from_start(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    if left.get("type") != "tool" or right.get("type") != "tool" or left.get("name") != "Read" or right.get("name") != "Read":
-        return False
-    left_args = left.get("arguments", {})
-    right_args = right.get("arguments", {})
-    if str(left_args.get("file_path", "")) != str(right_args.get("file_path", "")):
-        return False
-    if int(left_args.get("offset", left_args.get("start_line", 1))) != 1 or int(right_args.get("offset", right_args.get("start_line", 1))) != 1:
-        return False
-    return int(left_args.get("limit", left_args.get("max_lines", DEFAULT_READ_LIMIT))) > int(right_args.get("limit", right_args.get("max_lines", DEFAULT_READ_LIMIT)))
-
-
-def suggested_window_from_recent_grep(transcript: list[dict[str, Any]], read_call: dict[str, Any]) -> tuple[int, int] | None:
-    target = str(read_call.get("arguments", {}).get("file_path", ""))
-    for turn in reversed(transcript):
-        if turn.get("decision", {}).get("name") != "Grep":
-            continue
-        matches = turn.get("observations", [{}])[-1].get("matches", [])
-        if not isinstance(matches, list):
-            continue
-        for match in matches:
-            if str(match.get("file", "")) == target:
-                return max(1, int(match.get("line", 1)) - 10), 30
-    return None
-
-
-def recent_alternative_files_from_grep(transcript: list[dict[str, Any]], current_file: str, *, limit: int = 3) -> list[str]:
-    suggestions: list[str] = []
-    seen: set[str] = set()
-    for turn in reversed(transcript):
-        if turn.get("decision", {}).get("name") != "Grep":
-            continue
-        matches = turn.get("observations", [{}])[-1].get("matches", [])
-        if not isinstance(matches, list):
-            continue
-        for match in matches:
-            path = str(match.get("file", ""))
-            if path and path != current_file and path not in seen:
-                seen.add(path)
-                suggestions.append(path)
-                if len(suggestions) >= limit:
-                    return suggestions
-    return suggestions
-
-
-def suggested_read_for_file_from_recent_grep(transcript: list[dict[str, Any]], file_path: str) -> dict[str, Any] | None:
-    hinted_window = suggested_window_from_recent_grep(transcript, {"arguments": {"file_path": file_path}})
-    if not hinted_window:
-        return None
-    offset, limit = hinted_window
-    return {"file_path": file_path, "offset": offset, "limit": limit}
-
-
-def repeated_read_same_file(transcript: list[dict[str, Any]], current_read: dict[str, Any], *, threshold: int = 3) -> bool:
-    target = str(current_read.get("arguments", {}).get("file_path", ""))
-    repeats = 0
-    for turn in reversed(transcript):
-        if turn.get("decision", {}).get("name") != "Read":
-            continue
-        if str(turn.get("decision", {}).get("arguments", {}).get("file_path", "")) == target:
-            repeats += 1
-            if repeats >= threshold:
-                return True
-    return False
-
-
 def is_blocking_failure_for_final(observation: dict[str, Any]) -> bool:
     if observation.get("ok", True):
         return False
     return not observation.get("controller_guidance", False)
 
 
-def run_loop(model: Any, generation_config: Any, *, task: str, workspace: Path, max_iterations: int, max_tokens: int, temperature: float, stream_output: bool, reflection_strength: str, kv_bits: int | None = None, kv_group_size: int | None = None, quantized_kv_start: int | None = None) -> LoopResult:
+def compress_turn(turn: dict[str, Any]) -> None:
+    """Replace large observation payloads with compact summaries in-place.
+
+    Called after the turn is no longer the active context window, so the
+    detailed content is no longer needed in subsequent prompts.
+    """
+    decision = turn.get("decision", {})
+    if decision.get("type") != "tool":
+        return
+    tool_name = decision.get("name", "")
+    iteration = turn.get("iteration", "?")
+    args = decision.get("arguments", {})
+    for obs in turn.get("observations", []):
+        if not obs.get("ok"):
+            continue
+        if tool_name == "Read":
+            content = obs.get("content", "")
+            if content and len(content) > 200:
+                file_path = args.get("file_path", "?")
+                n_lines = obs.get("returned_lines", content.count("\n") + 1)
+                obs["content"] = f"[compressed: Read {file_path} ~{n_lines} lines, seen at iter {iteration}]"
+                obs.pop("truncated", None)
+        elif tool_name in {"Grep", "Glob"}:
+            matches = obs.get("matches")
+            if isinstance(matches, list):
+                pattern = args.get("pattern", "?")
+                obs["matches"] = f"[compressed: {len(matches)} matches for {pattern!r}, seen at iter {iteration}]"
+                obs.pop("read_suggestions", None)
+                obs.pop("related_files", None)
+        elif tool_name == "Bash":
+            output = obs.get("output", "")
+            if output and len(output) > 200:
+                obs["output"] = f"[compressed: Bash output {len(output)} chars, seen at iter {iteration}]"
+
+
+def run_loop(
+    model: Any,
+    generation_config: Any,
+    *,
+    task: str,
+    workspace: Path,
+    max_iterations: int,
+    max_tokens: int,
+    temperature: float,
+    stream_output: bool,
+    reflection_strength: str,
+    kv_bits: int | None = None,
+    kv_group_size: int | None = None,
+    quantized_kv_start: int | None = None,
+    event_callback: Callable[[dict[str, Any]], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
+    # Experimental features
+    compress_observations: bool = False,
+    transcript_window: int | None = None,
+    multi_tool: bool = False,
+) -> LoopResult:
     transcript: list[dict[str, Any]] = []
     tool_calls = 0
     evidence_cache: dict[str, dict[str, Any]] = {}
     no_new_evidence_streak = 0
     narrow_empty_search_streak = 0
-    rubric: EvidenceRubric | None = None
+    plan_state: dict[str, Any] | None = None
+    running_tool_stats: dict[str, Any] = {"counts": {}, "failures": 0}
 
     for iteration in range(1, max_iterations + 1):
+        if should_stop is not None and should_stop():
+            return LoopResult(False, "cancelled", max(1, iteration - 1), tool_calls, transcript)
+        if event_callback is not None:
+            event_callback({"type": "iteration_start", "iteration": iteration})
         reflection_hint = ""
         if reflection_strength != "none":
             previous_observations = transcript[-1].get("observations", []) if transcript else []
@@ -218,135 +306,291 @@ def run_loop(model: Any, generation_config: Any, *, task: str, workspace: Path, 
             if hints:
                 reflection_hint = "\nReflection trigger:\n- " + "\n- ".join(hints) + "\n"
 
-        prompt = build_prompt(task, transcript, workspace, rubric=rubric or default_evidence_rubric(), remaining_iterations=max_iterations - iteration + 1, reflection_hint=reflection_hint)
+        prompt = build_prompt(
+            task,
+            transcript,
+            workspace,
+            current_plan=plan_state or default_plan_state(),
+            remaining_iterations=max_iterations - iteration + 1,
+            reflection_hint=reflection_hint,
+            window=transcript_window,
+            multi_tool=multi_tool,
+        )
+        tokenizer = getattr(model, "tokenizer", None)
+        prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
         config = generation_config(temperature=temperature, max_tokens=max_tokens, top_p=0.9)
+        # Fix #4: stop decoding at closing tags to avoid post-JSON prose.
+        try:
+            config.stop_sequences = ["</tool_call>", "</final>"]
+        except Exception:
+            pass
         if kv_bits is not None:
             setattr(config, "kv_bits", kv_bits)
         if kv_group_size is not None:
             setattr(config, "kv_group_size", kv_group_size)
         if quantized_kv_start is not None:
             setattr(config, "quantized_kv_start", quantized_kv_start)
+        enable_terminal_stream = stream_output and event_callback is None
         if stream_output:
-            tokenizer = getattr(model, "tokenizer", None)
-            prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
             chunks: list[str] = []
             generated_token_count = 0
             prefill_started = time.perf_counter()
             first_token_latency: float | None = None
             decode_started: float | None = None
 
-            if HAS_RICH and RICH_STDERR is not None and Live is not None:
+            if enable_terminal_stream and HAS_RICH and RICH_STDERR is not None and Live is not None:
                 with Live(build_status_renderable(iteration, phase="prefill", prompt_tokens=prompt_tokens, first_token_latency=None, generated_tokens=0, elapsed=0.0, tps=0.0, raw_preview=""), console=RICH_STDERR, refresh_per_second=8, transient=False) as live:
                     for chunk in model.generate_stream(prompt, config=config):
+                        if should_stop is not None and should_stop():
+                            return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
                         text = str(chunk)
                         if decode_started is None:
                             first_token_latency = time.perf_counter() - prefill_started
                             decode_started = time.perf_counter()
                         chunks.append(text)
-                        if tokenizer is not None:
+                        # Fix #3: sample token count every 20 chunks instead of every chunk.
+                        if tokenizer is not None and len(chunks) % 20 == 0:
                             generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
                         elapsed = max((time.perf_counter() - (decode_started or time.perf_counter())), 1e-6)
                         tps = generated_token_count / elapsed if generated_token_count else 0.0
                         live.update(build_status_renderable(iteration, phase="decode", prompt_tokens=prompt_tokens, first_token_latency=first_token_latency, generated_tokens=generated_token_count, elapsed=elapsed, tps=tps, raw_preview="".join(chunks)))
+                        if event_callback is not None:
+                            event_callback({"type": "stream_chunk", "iteration": iteration, "chunk": text})
+                    # Final accurate token count after stream ends.
+                    if tokenizer is not None and chunks:
+                        generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
                     total_elapsed = max((time.perf_counter() - decode_started), 1e-6) if decode_started is not None else 0.0
                     total_tps = generated_token_count / total_elapsed if generated_token_count and total_elapsed else 0.0
                     live.update(build_status_renderable(iteration, phase="decode-complete" if decode_started is not None else "prefill-no-output", prompt_tokens=prompt_tokens, first_token_latency=first_token_latency, generated_tokens=generated_token_count, elapsed=total_elapsed, tps=total_tps, raw_preview="".join(chunks)))
             else:
-                prefill_stop, prefill_thread, _ = start_prefill_indicator(iteration, prompt_tokens)
+                prefill_stop = None
+                prefill_thread = None
                 emitted_prefill_summary = False
                 last_decode_report = 0.0
+                if enable_terminal_stream:
+                    prefill_stop, prefill_thread, _ = start_prefill_indicator(iteration, prompt_tokens)
                 for chunk in model.generate_stream(prompt, config=config):
+                    if should_stop is not None and should_stop():
+                        return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
                     text = str(chunk)
                     if not emitted_prefill_summary:
-                        prefill_stop.set()
-                        prefill_thread.join(timeout=0.3)
+                        if prefill_stop is not None and prefill_thread is not None:
+                            prefill_stop.set()
+                            prefill_thread.join(timeout=0.3)
                         first_token_latency = time.perf_counter() - prefill_started
-                        print(f"\r[iteration {iteration}] prefill complete prompt_tokens={prompt_tokens if prompt_tokens is not None else '?'} first_token_latency={first_token_latency:.2f}s", file=sys.stderr, flush=True)
-                        print(f"[iteration {iteration}] model stream:", file=sys.stderr, flush=True)
+                        if enable_terminal_stream:
+                            print(f"\r[iteration {iteration}] prefill complete prompt_tokens={prompt_tokens if prompt_tokens is not None else '?'} first_token_latency={first_token_latency:.2f}s", file=sys.stderr, flush=True)
+                            print(f"[iteration {iteration}] model stream:", file=sys.stderr, flush=True)
+                        if event_callback is not None:
+                            event_callback(
+                                {
+                                    "type": "prefill_complete",
+                                    "iteration": iteration,
+                                    "prompt_tokens": prompt_tokens,
+                                    "first_token_latency": first_token_latency,
+                                }
+                            )
                         emitted_prefill_summary = True
                         decode_started = time.perf_counter()
                     chunks.append(text)
-                    if tokenizer is not None:
+                    # Fix #3: sample token count every 20 chunks instead of every chunk.
+                    if tokenizer is not None and len(chunks) % 20 == 0:
                         generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
-                    print(text, end="", file=sys.stderr, flush=True)
+                    if event_callback is not None:
+                        event_callback({"type": "stream_chunk", "iteration": iteration, "chunk": text})
+                    if enable_terminal_stream:
+                        print(text, end="", file=sys.stderr, flush=True)
                     now = time.perf_counter()
                     if decode_started is not None and (now - last_decode_report >= 0.5):
                         elapsed = max(now - decode_started, 1e-6)
                         tps = generated_token_count / elapsed if generated_token_count else 0.0
-                        print(f"\n[iteration {iteration}] decode generated_tokens={generated_token_count} elapsed={elapsed:.2f}s tok_s={tps:.1f}", file=sys.stderr, flush=True)
+                        if event_callback is not None:
+                            event_callback(
+                                {
+                                    "type": "decode_stats",
+                                    "iteration": iteration,
+                                    "generated_tokens": generated_token_count,
+                                    "elapsed": elapsed,
+                                    "tps": tps,
+                                }
+                            )
+                        if enable_terminal_stream:
+                            print(f"\n[iteration {iteration}] decode generated_tokens={generated_token_count} elapsed={elapsed:.2f}s tok_s={tps:.1f}", file=sys.stderr, flush=True)
                         last_decode_report = now
                 if not emitted_prefill_summary:
-                    prefill_stop.set()
-                    prefill_thread.join(timeout=0.3)
-                print("", file=sys.stderr, flush=True)
+                    if prefill_stop is not None and prefill_thread is not None:
+                        prefill_stop.set()
+                        prefill_thread.join(timeout=0.3)
+                if enable_terminal_stream:
+                    print("", file=sys.stderr, flush=True)
+                # Final accurate token count after stream ends.
+                if tokenizer is not None and chunks:
+                    generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
             raw = "".join(chunks).strip()
         else:
             raw = getattr(model.generate(prompt, config=config), "text", "").strip()
+            if event_callback is not None:
+                event_callback({"type": "model_output", "iteration": iteration, "text": raw})
 
-        turn: dict[str, Any] = {"iteration": iteration, "raw": raw}
+        generated_tokens = count_tokens(tokenizer, raw) if tokenizer is not None else None
+        turn: dict[str, Any] = {
+            "iteration": iteration,
+            "raw": raw,
+            "telemetry": {
+                "prompt_tokens": prompt_tokens,
+                "generated_tokens": generated_tokens,
+            },
+        }
+
+        # --- Multi-tool path (experimental) ---
+        if multi_tool:
+            all_calls = extract_all_tool_calls(raw)
+            if len(all_calls) >= 2:
+                # Normalize each call; skip if any is non-tool (plan/final).
+                normalized_calls: list[dict[str, Any]] = []
+                parse_error: str | None = None
+                for raw_call in all_calls:
+                    try:
+                        norm = normalize_response(raw_call)
+                        if norm["type"] != "tool":
+                            parse_error = f"Multi-tool response contained non-tool block: {norm['type']}"
+                            break
+                        normalized_calls.append(norm)
+                    except Exception as exc:
+                        parse_error = str(exc)
+                        break
+                if parse_error or not normalized_calls:
+                    turn["observations"] = [{"ok": False, "error": parse_error or "Empty multi-tool call list."}]
+                    transcript.append(turn)
+                    _update_tool_stats(running_tool_stats, turn)
+                    if compress_observations and len(transcript) >= 2:
+                        compress_turn(transcript[-2])
+                    continue
+                observations: list[dict[str, Any]] = []
+                added_evidence_total = 0
+                for call in normalized_calls:
+                    if should_stop is not None and should_stop():
+                        return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
+                    obs = run_tool(call, workspace)
+                    tool_calls += 1
+                    observations.append(obs)
+                    added_evidence_total += update_evidence_cache(evidence_cache, call, obs)
+                turn["decisions"] = normalized_calls
+                turn["decision"] = normalized_calls[0]  # keep compat for reflection hints
+                turn["observations"] = observations
+                turn["evidence_cache_size"] = len(evidence_cache)
+                turn["new_evidence"] = added_evidence_total
+                no_new_evidence_streak = 0 if added_evidence_total > 0 else no_new_evidence_streak + 1
+                # narrow_empty_search streak only applies to single tool calls
+                narrow_empty_search_streak = 0
+                _update_tool_stats(running_tool_stats, turn)
+                if event_callback is not None:
+                    for call, obs in zip(normalized_calls, observations):
+                        event_callback({"type": "observation", "iteration": iteration, "decision": call, "observation": obs})
+                    event_callback(
+                        {
+                            "type": "dashboard",
+                            "iteration": iteration,
+                            "evidences": summarize_evidence(evidence_cache),
+                            "tool_stats": dict(running_tool_stats),
+                            "plan": plan_state or default_plan_state(),
+                        }
+                    )
+                if stream_output:
+                    for call, obs in zip(normalized_calls, observations):
+                        emit_observation_rendered(iteration, call, obs)
+                transcript.append(turn)
+                if compress_observations and len(transcript) >= 2:
+                    compress_turn(transcript[-2])
+                continue
+            # Fall through to single-tool path if fewer than 2 calls found.
+
+        # --- Single-tool / plan / final path ---
         try:
             response = normalize_response(extract_first_json_object(raw))
         except Exception:
             turn["observations"] = [{"ok": False, "error": "Output was not a valid tool_call/final JSON block."}]
             transcript.append(turn)
+            _update_tool_stats(running_tool_stats, turn)
+            if compress_observations and len(transcript) >= 2:
+                compress_turn(transcript[-2])
             continue
 
         turn["decision"] = response
-        if response["type"] == "rubric":
-            rubric = parse_evidence_rubric(response)
-            turn["observations"] = [{"ok": True, "rubric_captured": True}]
+        if response["type"] == "plan":
+            plan_state = response["plan"]
+            turn["observations"] = [{"ok": True, "plan_captured": True, "plan": plan_state}]
+            if event_callback is not None:
+                event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": turn["observations"][-1]})
+                event_callback({"type": "plan_state", "iteration": iteration, "plan": plan_state})
+                _update_tool_stats(running_tool_stats, turn)
+                event_callback(
+                    {
+                        "type": "dashboard",
+                        "iteration": iteration,
+                        "evidences": summarize_evidence(evidence_cache),
+                        "tool_stats": dict(running_tool_stats),
+                        "plan": plan_state,
+                    }
+                )
             if stream_output:
                 emit_observation_rendered(iteration, response, turn["observations"][-1])
             transcript.append(turn)
+            if compress_observations and len(transcript) >= 2:
+                compress_turn(transcript[-2])
+            continue
+
+        if response["type"] == "plan_update":
+            incoming_plan = response["plan"]
+            if plan_state is None:
+                plan_state = incoming_plan
+            else:
+                merged = dict(plan_state)
+                merged["goal"] = incoming_plan.get("goal", merged.get("goal"))
+                merged["steps"] = incoming_plan.get("steps", merged.get("steps", []))
+                merged["done_when"] = incoming_plan.get("done_when", merged.get("done_when"))
+                merged["completed_steps"] = incoming_plan.get("completed_steps", merged.get("completed_steps", []))
+                merged["current_step"] = incoming_plan.get("current_step", merged.get("current_step"))
+                plan_state = parse_plan_payload(merged)
+            turn["observations"] = [{"ok": True, "plan_updated": True, "plan": plan_state}]
+            if event_callback is not None:
+                event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": turn["observations"][-1]})
+                event_callback({"type": "plan_state", "iteration": iteration, "plan": plan_state})
+                _update_tool_stats(running_tool_stats, turn)
+                event_callback(
+                    {
+                        "type": "dashboard",
+                        "iteration": iteration,
+                        "evidences": summarize_evidence(evidence_cache),
+                        "tool_stats": dict(running_tool_stats),
+                        "plan": plan_state,
+                    }
+                )
+            transcript.append(turn)
+            if compress_observations and len(transcript) >= 2:
+                compress_turn(transcript[-2])
             continue
 
         if response["type"] == "final":
             previous_observations = transcript[-1].get("observations", []) if transcript else []
             if any(is_blocking_failure_for_final(observation) for observation in previous_observations):
                 turn["observations"] = [{"ok": False, "error": "Cannot finish immediately after a blocking tool failure."}]
+                if event_callback is not None:
+                    event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": turn["observations"][-1]})
                 if stream_output:
                     emit_observation_rendered(iteration, response, turn["observations"][-1])
                 transcript.append(turn)
+                if compress_observations and len(transcript) >= 2:
+                    compress_turn(transcript[-2])
                 continue
             turn["observations"] = []
+            if event_callback is not None:
+                event_callback({"type": "final", "iteration": iteration, "answer": response["answer"]})
             transcript.append(turn)
             return LoopResult(True, response["answer"], iteration, tool_calls, transcript)
 
-        previous_decision = transcript[-1].get("decision", {}) if transcript else {}
-        if same_read_window(response, previous_decision):
-            turn["observations"] = [{"ok": False, "controller_guidance": True, "error": "The same Read window was requested again. Change strategy now. Change strategy now. Change strategy now. Use a different offset/limit, inspect a different file, or use Grep to locate a more precise line before reading."}]
-            if stream_output:
-                emit_observation_rendered(iteration, response, turn["observations"][-1])
-            transcript.append(turn)
-            continue
-        if expanding_read_from_start(response, previous_decision):
-            turn["observations"] = [{"ok": False, "controller_guidance": True, "error": "Do not expand the same file from offset=1. Use Grep to locate a line, then Read a small window around that line, or switch to a different file."}]
-            if stream_output:
-                emit_observation_rendered(iteration, response, turn["observations"][-1])
-            transcript.append(turn)
-            continue
-        if response.get("type") == "tool" and response.get("name") == "Read":
-            hinted_window = suggested_window_from_recent_grep(transcript, response)
-            read_args = response.get("arguments", {})
-            target_file = str(read_args.get("file_path", ""))
-            requested_offset = int(read_args.get("offset", read_args.get("start_line", 1)))
-            requested_limit = int(read_args.get("limit", read_args.get("max_lines", DEFAULT_READ_LIMIT)))
-            if repeated_read_same_file(transcript, response):
-                alternative_files = recent_alternative_files_from_grep(transcript, target_file)
-                suggested_read = suggested_read_for_file_from_recent_grep(transcript, alternative_files[0]) if alternative_files else None
-                turn["observations"] = [{"ok": False, "controller_guidance": True, "error": "This file has already been read multiple times. Switch to a different file unless you have a very specific new offset to inspect.", "switch_file_suggestions": alternative_files, "suggested_read": suggested_read}]
-                if stream_output:
-                    emit_observation_rendered(iteration, response, turn["observations"][-1])
-                transcript.append(turn)
-                continue
-            if hinted_window and (requested_offset, requested_limit) != hinted_window:
-                offset, limit = hinted_window
-                turn["observations"] = [{"ok": False, "controller_guidance": True, "error": f"A recent Grep already provided a relevant line. Read around that line instead, for example offset={offset}, limit={limit}."}]
-                if stream_output:
-                    emit_observation_rendered(iteration, response, turn["observations"][-1])
-                transcript.append(turn)
-                continue
-
+        if should_stop is not None and should_stop():
+            return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
         observation = run_tool(response, workspace)
         tool_calls += 1
         turn["observations"] = [observation]
@@ -355,11 +599,27 @@ def run_loop(model: Any, generation_config: Any, *, task: str, workspace: Path, 
         turn["new_evidence"] = added_evidence
         no_new_evidence_streak = 0 if added_evidence > 0 else no_new_evidence_streak + 1
         narrow_empty_search_streak = narrow_empty_search_streak + 1 if is_empty_search_observation(response, observation) and looks_like_narrow_search(response) else 0
+        _update_tool_stats(running_tool_stats, turn)
+        if event_callback is not None:
+            event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": observation})
+            event_callback(
+                {
+                    "type": "dashboard",
+                    "iteration": iteration,
+                    "evidences": summarize_evidence(evidence_cache),
+                    "tool_stats": dict(running_tool_stats),
+                    "plan": plan_state or default_plan_state(),
+                }
+            )
         if stream_output:
             emit_observation_rendered(iteration, response, observation)
         transcript.append(turn)
+        if compress_observations and len(transcript) >= 2:
+            compress_turn(transcript[-2])
         if narrow_empty_search_streak >= 3:
             injected = {"iteration": iteration, "raw": "<controller_observation>", "observations": [{"ok": False, "controller_guidance": True, "error": "Repeated narrow search returned no results. Broaden the search: enumerate a parent directory, inspect candidate files already found, or use a wider pattern before guessing more exact names."}], "controller_injected_observation": True}
+            if event_callback is not None:
+                event_callback({"type": "observation", "iteration": iteration, "decision": {"type": "controller", "name": "recovery"}, "observation": injected["observations"][-1]})
             if stream_output:
                 emit_observation_rendered(iteration, {"type": "controller", "name": "recovery"}, injected["observations"][-1])
             transcript.append(injected)
