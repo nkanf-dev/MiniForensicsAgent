@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 
 DEFAULT_READ_LIMIT = 80
+MAX_MATCH_PREVIEW = 80
+MAX_MATCH_TEXT_PREVIEW = 240
+SPILL_DIRNAME = ".mini_forensics_spill"
 
 
 def expand_brace_pattern(pattern: str) -> list[str]:
@@ -94,14 +99,44 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
                 break
         return related
 
+    def trim_text_for_preview(text: str, max_chars: int = MAX_MATCH_TEXT_PREVIEW) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[: max_chars - 1] + "…"
+
+    def write_spill(tool_name: str, payload: dict[str, Any]) -> str:
+        spill_dir = workspace / SPILL_DIRNAME
+        spill_dir.mkdir(parents=True, exist_ok=True)
+        spill_file = spill_dir / f"{tool_name.lower()}_{int(time.time() * 1000)}.json"
+        spill_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(spill_file.relative_to(workspace))
+
+    def parse_positive_int(value: Any, default: int) -> int:
+        if isinstance(value, bool):
+            return default
+        if isinstance(value, int):
+            return max(1, value)
+        if isinstance(value, float):
+            return max(1, int(value))
+        try:
+            parsed = int(str(value).strip())
+            return max(1, parsed)
+        except Exception:
+            return default
+
     try:
         if tool == "Read":
             file_path = resolve_inside_workspace(str(args["file_path"]))
-            offset = max(1, int(args.get("offset", args.get("start_line", 1))))
-            limit = max(1, int(args.get("limit", args.get("max_lines", DEFAULT_READ_LIMIT))))
+            offset = parse_positive_int(args.get("offset", args.get("start_line", 1)), 1)
+            raw_limit = args.get("limit", args.get("max_lines", DEFAULT_READ_LIMIT))
             lines = file_path.read_text(encoding="utf-8").splitlines()
             start_index = offset - 1
-            end_index = start_index + limit
+            if str(raw_limit).strip().lower() in {"end", "eof", "-1"}:
+                limit = max(1, len(lines) - start_index)
+                end_index = len(lines)
+            else:
+                limit = parse_positive_int(raw_limit, DEFAULT_READ_LIMIT)
+                end_index = start_index + limit
             chunk = lines[start_index:end_index]
             return {"ok": True, "content": "\n".join(chunk), "offset": offset, "limit": limit, "returned_lines": len(chunk), "total_lines": len(lines), "truncated": end_index < len(lines)}
 
@@ -121,13 +156,35 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
                         matches.append(str(Path(line).resolve().relative_to(workspace)))
                     except Exception:
                         continue
-            matches = sorted(dict.fromkeys(matches))[:200]
+            matches = sorted(dict.fromkeys(matches))
             if not matches:
                 related = suggest_related_paths_for_glob(root, str(args["pattern"]))
                 hint = "No glob matches. Try a broader pattern, inspect nearby directories, or search a parent path first."
                 if related:
                     hint += f" Related paths: {', '.join(related[:5])}"
                 return {"ok": True, "matches": [], "hint": hint, "related_files": related[:8]}
+            if len(matches) > MAX_MATCH_PREVIEW:
+                preview = matches[:MAX_MATCH_PREVIEW]
+                spill_path = write_spill(
+                    "Glob",
+                    {
+                        "tool": "Glob",
+                        "workspace": str(workspace),
+                        "path": str(args.get("path", ".")),
+                        "pattern": str(args.get("pattern", "")),
+                        "total_matches": len(matches),
+                        "matches": matches,
+                    },
+                )
+                return {
+                    "ok": True,
+                    "matches": preview,
+                    "truncated": True,
+                    "total_matches": len(matches),
+                    "omitted_matches": len(matches) - len(preview),
+                    "output_path": spill_path,
+                    "hint": "Result list is long. Showing preview only; full matches were spilled to output_path.",
+                }
             return {"ok": True, "matches": matches}
 
         if tool == "Grep":
@@ -142,6 +199,8 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
             rg_cmd.append(str(root))
             completed = subprocess.run(rg_cmd, cwd=workspace, capture_output=True, text=True, timeout=180, check=False)
             matches: list[dict[str, Any]] = []
+            full_matches: list[dict[str, Any]] = []
+            trimmed_lines = 0
             for line in completed.stdout.splitlines():
                 parts = line.split(":", 2)
                 if len(parts) != 3:
@@ -151,15 +210,54 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
                     rel = str(Path(file_part).resolve().relative_to(workspace))
                 except Exception:
                     rel = file_part
-                matches.append({"file": rel, "line": int(line_no) if line_no.isdigit() else 1, "text": text})
+                line_value = int(line_no) if line_no.isdigit() else 1
+                full_matches.append({"file": rel, "line": line_value, "text": text})
+                preview_text = trim_text_for_preview(text)
+                if preview_text != text:
+                    trimmed_lines += 1
+                matches.append({"file": rel, "line": line_value, "text": preview_text})
             if not matches:
                 related = suggest_related_files(root, pattern, glob_patterns)
                 hint = "No exact text match. Try a broader pattern, inspect related files, or search for nearby runtime symbols."
                 if related:
                     hint += f" Related files: {', '.join(related[:5])}"
                 return {"ok": True, "matches": [], "hint": hint, "related_files": related[:8]}
-            trimmed = matches[:200]
-            return {"ok": True, "matches": trimmed, "hint": "Use Read on a small window around one of the matched lines instead of reading from offset=1.", "read_suggestions": build_read_suggestions(trimmed)}
+            if len(matches) > MAX_MATCH_PREVIEW:
+                preview = matches[:MAX_MATCH_PREVIEW]
+                spill_path = write_spill(
+                    "Grep",
+                    {
+                        "tool": "Grep",
+                        "workspace": str(workspace),
+                        "path": str(args.get("path", ".")),
+                        "glob": str(args.get("glob", "*")),
+                        "pattern": pattern,
+                        "total_matches": len(full_matches),
+                        "matches": full_matches,
+                    },
+                )
+                response: dict[str, Any] = {
+                    "ok": True,
+                    "matches": preview,
+                    "truncated": True,
+                    "total_matches": len(matches),
+                    "omitted_matches": len(matches) - len(preview),
+                    "output_path": spill_path,
+                    "hint": "Result list is long. Showing preview only; full matches were spilled to output_path.",
+                    "read_suggestions": build_read_suggestions(preview),
+                }
+                if trimmed_lines > 0:
+                    response["trimmed_line_texts"] = trimmed_lines
+                return response
+            response = {
+                "ok": True,
+                "matches": matches,
+                "hint": "Use Read on a small window around one of the matched lines instead of reading from offset=1.",
+                "read_suggestions": build_read_suggestions(matches),
+            }
+            if trimmed_lines > 0:
+                response["trimmed_line_texts"] = trimmed_lines
+            return response
 
         if tool == "Write":
             file_path = resolve_inside_workspace(str(args["file_path"]))
