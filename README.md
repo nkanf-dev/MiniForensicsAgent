@@ -9,12 +9,19 @@ A small local forensics-style explorer loop for MLX models.
 - Prefers runtime evidence over weak clues
 - Uses Claude Code-style `Read(file_path, offset, limit)`
 - Shows streaming progress and observations with `rich`
+- Includes a Textual TUI with parameter popup, run history, and observability
 
 ## Install
 
 ```bash
-cd /Users/nkanf/MiniForensicsAgent
+cd MiniForensicsAgent
 uv sync
+```
+
+Optional TurboQuant backend:
+
+```bash
+uv sync --extra turboquant
 ```
 
 ## Run
@@ -30,5 +37,18 @@ uv run mini-forensics-agent \
 Or use the helper script:
 
 ```bash
-/Users/nkanf/MiniForensicsAgent/scripts/run-mini-forensics-agent --help
+./scripts/run-mini-forensics-agent --help
 ```
+
+## TUI
+
+```bash
+uv run mini-forensics-agent-tui
+```
+
+TUI keys:
+- `r` run task
+- `s` stop current run
+- `n` new conversation
+- `p` open parameter popup
+- `q` quit
