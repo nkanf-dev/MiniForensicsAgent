@@ -14,10 +14,11 @@ from .evidence import (
 )
 from .prompting import build_prompt
 from .render import HAS_RICH, Live, RICH_STDERR, build_status_renderable, count_tokens, emit_observation_rendered, start_prefill_indicator
-from .tools import DEFAULT_READ_LIMIT, run_tool
+from .skills import SkillCatalog, render_active_skill_context, render_skill_catalog
+from .tools import run_tool
 
 
-TOOL_NAMES = {"Read", "Glob", "Grep", "Bash", "Write", "Edit"}
+TOOL_NAMES = {"Read", "Glob", "Grep", "Bash", "Write", "Edit", "ActivateSkill", "ReadSkillResource"}
 
 
 @dataclass
@@ -249,6 +250,15 @@ def compress_turn(turn: dict[str, Any]) -> None:
                 obs["output"] = f"[compressed: Bash output {len(output)} chars, seen at iter {iteration}]"
 
 
+def update_active_skills(active_skills: dict[str, dict[str, Any]], decision: dict[str, Any], observation: dict[str, Any]) -> None:
+    if decision.get("type") != "tool" or not observation.get("ok"):
+        return
+    if decision.get("name") == "ActivateSkill":
+        skill_name = str(observation.get("name", "")).strip()
+        if skill_name:
+            active_skills[skill_name] = dict(observation)
+
+
 def run_loop(
     model: Any,
     generation_config: Any,
@@ -269,6 +279,7 @@ def run_loop(
     compress_observations: bool = False,
     transcript_window: int | None = None,
     multi_tool: bool = False,
+    skill_catalog: SkillCatalog | None = None,
 ) -> LoopResult:
     transcript: list[dict[str, Any]] = []
     tool_calls = 0
@@ -277,6 +288,8 @@ def run_loop(
     narrow_empty_search_streak = 0
     plan_state: dict[str, Any] | None = None
     running_tool_stats: dict[str, Any] = {"counts": {}, "failures": 0}
+    active_skills: dict[str, dict[str, Any]] = {}
+    available_skills_block = render_skill_catalog(skill_catalog) if skill_catalog is not None else ""
 
     for iteration in range(1, max_iterations + 1):
         if should_stop is not None and should_stop():
@@ -315,6 +328,8 @@ def run_loop(
             reflection_hint=reflection_hint,
             window=transcript_window,
             multi_tool=multi_tool,
+            available_skills=available_skills_block,
+            active_skill_context=render_active_skill_context(active_skills),
         )
         tokenizer = getattr(model, "tokenizer", None)
         prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
@@ -471,9 +486,15 @@ def run_loop(
                 for call in normalized_calls:
                     if should_stop is not None and should_stop():
                         return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
-                    obs = run_tool(call, workspace)
+                    obs = run_tool(
+                        call,
+                        workspace,
+                        skill_catalog=skill_catalog,
+                        active_skill_names=set(active_skills),
+                    )
                     tool_calls += 1
                     observations.append(obs)
+                    update_active_skills(active_skills, call, obs)
                     added_evidence_total += update_evidence_cache(evidence_cache, call, obs)
                 turn["decisions"] = normalized_calls
                 turn["decision"] = normalized_calls[0]  # keep compat for reflection hints
@@ -591,8 +612,14 @@ def run_loop(
 
         if should_stop is not None and should_stop():
             return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
-        observation = run_tool(response, workspace)
+        observation = run_tool(
+            response,
+            workspace,
+            skill_catalog=skill_catalog,
+            active_skill_names=set(active_skills),
+        )
         tool_calls += 1
+        update_active_skills(active_skills, response, observation)
         turn["observations"] = [observation]
         added_evidence = update_evidence_cache(evidence_cache, response, observation)
         turn["evidence_cache_size"] = len(evidence_cache)

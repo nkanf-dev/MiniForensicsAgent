@@ -13,6 +13,8 @@ def build_prompt(
     reflection_hint: str = "",
     window: int | None = None,
     multi_tool: bool = False,
+    available_skills: str = "",
+    active_skill_context: str = "",
 ) -> str:
     visible = transcript[-window:] if window is not None and window > 0 else transcript
     history = json.dumps(visible, ensure_ascii=False, indent=2) if visible else "[]"
@@ -86,6 +88,27 @@ Do not call a tool on the first turn.
             "- or {\"type\":\"plan_update\",\"completed_steps\":[\"step\"],\"current_step\":\"step\"}\n"
             "- or <final>{\"answer\":\"done\"}</final>"
         )
+    skill_block = ""
+    skill_tools = ""
+    skill_rules = ""
+    if available_skills:
+        skill_block = (
+            "Available skills:\n"
+            f"{available_skills}\n"
+        )
+        skill_tools = (
+            "- ActivateSkill(skill_name)\n"
+            "- ReadSkillResource(skill_name, file_path, offset=1, limit=120)\n"
+        )
+        skill_rules = (
+            "Skills:\n"
+            "- If one of the listed skills clearly matches the task, activate it before following its detailed instructions.\n"
+            "- Once a skill is activated, treat its instructions as active guidance for the rest of the run.\n"
+            "- Only read skill resources after activating that skill, and prefer the specific files the skill references.\n"
+        )
+    active_skill_block = ""
+    if active_skill_context:
+        active_skill_block = f"{active_skill_context}\n\n"
     return f"""You are a local codebase explorer.
 Use Claude Code style tool calls.
 {turn_format}
@@ -101,6 +124,7 @@ Tools:
 - Bash(command) [allowed: pwd, ls, find, cat]
 - Write(file_path, content)
 - Edit(file_path, old_string, new_string)
+{skill_tools}
 
 Forensics mode:
 - Treat the workspace as an evidence snapshot, not a live system.
@@ -118,13 +142,14 @@ Rules:
 - Do not keep increasing Read from offset=1 unless no line-targeted option exists.
 - If the last observation failed, fix it instead of finishing.
 - Goal is artifact discovery, not long explanation.
+{skill_rules}
 
 {plan_block}
 {convergence_block}
 {final_only_prefix}
 {plan_instruction}
 {few_shot}
-{reflection_hint}
+{skill_block}{active_skill_block}{reflection_hint}
 
 Task:
 {task}

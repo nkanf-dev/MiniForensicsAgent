@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .skills import DEFAULT_SKILL_READ_LIMIT, SkillCatalog, activate_skill, read_skill_resource
+
 
 DEFAULT_READ_LIMIT = 80
 MAX_MATCH_PREVIEW = 80
@@ -26,7 +28,13 @@ def expand_brace_pattern(pattern: str) -> list[str]:
     return expanded
 
 
-def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
+def run_tool(
+    call: dict[str, Any],
+    workspace: Path,
+    *,
+    skill_catalog: SkillCatalog | None = None,
+    active_skill_names: set[str] | None = None,
+) -> dict[str, Any]:
     tool = call["name"]
     args = call["arguments"]
     workspace = workspace.resolve()
@@ -125,6 +133,23 @@ def run_tool(call: dict[str, Any], workspace: Path) -> dict[str, Any]:
             return default
 
     try:
+        if tool == "ActivateSkill":
+            if skill_catalog is None:
+                return {"ok": False, "error": "Skills are not enabled for this run."}
+            return activate_skill(skill_catalog, str(args.get("skill_name", "")))
+
+        if tool == "ReadSkillResource":
+            if skill_catalog is None:
+                return {"ok": False, "error": "Skills are not enabled for this run."}
+            return read_skill_resource(
+                skill_catalog,
+                str(args.get("skill_name", "")),
+                str(args.get("file_path", "")),
+                offset=args.get("offset", 1),
+                limit=args.get("limit", DEFAULT_SKILL_READ_LIMIT),
+                active_skill_names=active_skill_names,
+            )
+
         if tool == "Read":
             file_path = resolve_inside_workspace(str(args["file_path"]))
             offset = parse_positive_int(args.get("offset", args.get("start_line", 1)), 1)

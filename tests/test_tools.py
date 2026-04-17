@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from miniforensicsagent.skills import discover_skills
 from miniforensicsagent.tools import run_tool
 
 
@@ -103,3 +104,34 @@ class ToolsTest(unittest.TestCase):
 
         caches = cache_module.make_prompt_cache(DummyModel())
         self.assertEqual(len(caches), 3)
+
+    def test_activate_skill_and_read_resource_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_file = root / ".mini-forensics-agent" / "skills" / "demo" / "SKILL.md"
+            reference = skill_file.parent / "references" / "guide.md"
+            reference.parent.mkdir(parents=True, exist_ok=True)
+            skill_file.write_text(
+                "---\nname: demo\ndescription: demo skill\n---\nRead references/guide.md\n",
+                encoding="utf-8",
+            )
+            reference.write_text("alpha\nbeta\n", encoding="utf-8")
+            catalog = discover_skills(root)
+
+            activated = run_tool(
+                {"name": "ActivateSkill", "arguments": {"skill_name": "demo"}},
+                root,
+                skill_catalog=catalog,
+                active_skill_names=set(),
+            )
+            resource = run_tool(
+                {"name": "ReadSkillResource", "arguments": {"skill_name": "demo", "file_path": "references/guide.md", "offset": 2, "limit": 1}},
+                root,
+                skill_catalog=catalog,
+                active_skill_names={"demo"},
+            )
+
+            self.assertTrue(activated["ok"])
+            self.assertIn("references/guide.md", activated["resource_files"])
+            self.assertTrue(resource["ok"])
+            self.assertEqual(resource["content"], "beta")
