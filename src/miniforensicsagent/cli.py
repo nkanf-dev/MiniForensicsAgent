@@ -11,6 +11,7 @@ from .models import (
     DEFAULT_AGENT_WORKSPACE,
     DEFAULT_MODEL_ROOT,
     discover_models,
+    discover_llama_cpp_models,
     load_local_model,
     patch_mlx_lm_prompt_cache_with_turboquant,
     resolve_model,
@@ -44,15 +45,21 @@ def main() -> int:
     parser.add_argument("--enable-skills", action="store_true", help="[exp] Discover Agent Skills and expose activation tools to the model.")
     parser.add_argument("--skill-dir", action="append", default=[], help="[exp] Additional Agent Skills root to scan. May be passed multiple times.")
     parser.add_argument("--list-skills", action="store_true", help="List discovered skills and exit.")
+    parser.add_argument("--engine", choices=["mlx", "llamacpp"], default="mlx", help="Model backend: mlx (default) or llamacpp.")
+    parser.add_argument("--llama-cpp-url", default="http://localhost:8080/v1", help="llama.cpp server base URL (used when --engine=llamacpp).")
+    parser.add_argument("--llama-cpp-model", default="qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf", help="Model ID for llama.cpp server (used when --engine=llamacpp).")
     args = parser.parse_args()
 
     root = Path(args.model_root).expanduser().resolve()
-    models = discover_models(root)
     workspace = Path(args.workspace).expanduser().resolve()
     skill_catalog = discover_skills(workspace, extra_dirs=args.skill_dir) if (args.enable_skills or args.list_skills) else None
     if args.list_models:
-        for model in models:
-            print(f"{model.name}\t{model.path}")
+        if args.engine == "llamacpp":
+            for m in discover_llama_cpp_models(args.llama_cpp_url):
+                print(f"{m.name}\t{m.path}")
+        else:
+            for model in discover_models(root):
+                print(f"{model.name}\t{model.path}")
         return 0
     if args.list_skills:
         if skill_catalog is None:
@@ -64,9 +71,22 @@ def main() -> int:
         return 0
     if not args.task.strip():
         parser.error("--task is required unless --list-models or --list-skills is used.")
-    selected = resolve_model(args.model, models, root)
     started = time.perf_counter()
-    model, generation_config = load_local_model(selected.path)
+    if args.engine == "llamacpp":
+        model, generation_config = load_local_model(
+            None,
+            engine="llamacpp",
+            llama_cpp_url=args.llama_cpp_url,
+            llama_cpp_model=args.llama_cpp_model,
+        )
+        selected_name = args.llama_cpp_model
+        selected_path = Path(args.llama_cpp_model)
+    else:
+        models = discover_models(root)
+        selected = resolve_model(args.model, models, root)
+        model, generation_config = load_local_model(selected.path, engine="mlx")
+        selected_name = selected.name
+        selected_path = selected.path
     if args.enable_skills and skill_catalog is not None:
         for diagnostic in skill_catalog.diagnostics:
             print(f"[skills] {diagnostic}", file=sys.stderr)
@@ -91,8 +111,8 @@ def main() -> int:
         skill_catalog=skill_catalog if args.enable_skills else None,
     )
     payload = {
-        "model": selected.name,
-        "model_path": str(selected.path),
+        "model": selected_name,
+        "model_path": str(selected_path),
         "success": result.success,
         "answer": result.answer,
         "iterations": result.iterations,
