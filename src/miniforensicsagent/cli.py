@@ -48,6 +48,7 @@ def main() -> int:
     parser.add_argument("--engine", choices=["mlx", "llamacpp"], default="mlx", help="Model backend: mlx (default) or llamacpp.")
     parser.add_argument("--llama-cpp-url", default="http://localhost:8080/v1", help="llama.cpp server base URL (used when --engine=llamacpp).")
     parser.add_argument("--llama-cpp-model", default="qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf", help="Model ID for llama.cpp server (used when --engine=llamacpp).")
+    parser.add_argument("--use-chat", action="store_true", help="Use /v1/chat/completions endpoint (for Jinja/chat template models).")
     args = parser.parse_args()
 
     root = Path(args.model_root).expanduser().resolve()
@@ -78,6 +79,7 @@ def main() -> int:
             engine="llamacpp",
             llama_cpp_url=args.llama_cpp_url,
             llama_cpp_model=args.llama_cpp_model,
+            use_chat=args.use_chat,
         )
         selected_name = args.llama_cpp_model
         selected_path = Path(args.llama_cpp_model)
@@ -109,6 +111,7 @@ def main() -> int:
         transcript_window=args.transcript_window,
         multi_tool=args.multi_tool,
         skill_catalog=skill_catalog if args.enable_skills else None,
+        use_chat=args.use_chat,
     )
     payload = {
         "model": selected_name,

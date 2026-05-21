@@ -12,7 +12,7 @@ from .evidence import (
     has_promising_but_incomplete_candidate,
     update_evidence_cache,
 )
-from .prompting import build_prompt
+from .prompting import build_chat_messages, build_prompt
 from .render import HAS_RICH, Live, RICH_STDERR, build_status_renderable, count_tokens, emit_observation_rendered, start_prefill_indicator
 from .skills import SkillCatalog, render_active_skill_context, render_skill_catalog
 from .tools import run_tool
@@ -280,6 +280,7 @@ def run_loop(
     transcript_window: int | None = None,
     multi_tool: bool = False,
     skill_catalog: SkillCatalog | None = None,
+    use_chat: bool = False,
 ) -> LoopResult:
     transcript: list[dict[str, Any]] = []
     tool_calls = 0
@@ -319,20 +320,34 @@ def run_loop(
             if hints:
                 reflection_hint = "\nReflection trigger:\n- " + "\n- ".join(hints) + "\n"
 
-        prompt = build_prompt(
-            task,
-            transcript,
-            workspace,
-            current_plan=plan_state or default_plan_state(),
-            remaining_iterations=max_iterations - iteration + 1,
-            reflection_hint=reflection_hint,
-            window=transcript_window,
-            multi_tool=multi_tool,
-            available_skills=available_skills_block,
-            active_skill_context=render_active_skill_context(active_skills),
-        )
         tokenizer = getattr(model, "tokenizer", None)
-        prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
+        if use_chat:
+            messages = build_chat_messages(
+                task,
+                transcript,
+                workspace,
+                current_plan=plan_state or default_plan_state(),
+                remaining_iterations=max_iterations - iteration + 1,
+                reflection_hint=reflection_hint,
+                multi_tool=multi_tool,
+                available_skills=available_skills_block,
+                active_skill_context=render_active_skill_context(active_skills),
+            )
+            prompt_tokens = None
+        else:
+            prompt = build_prompt(
+                task,
+                transcript,
+                workspace,
+                current_plan=plan_state or default_plan_state(),
+                remaining_iterations=max_iterations - iteration + 1,
+                reflection_hint=reflection_hint,
+                window=transcript_window,
+                multi_tool=multi_tool,
+                available_skills=available_skills_block,
+                active_skill_context=render_active_skill_context(active_skills),
+            )
+            prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
         config = generation_config(temperature=temperature, max_tokens=max_tokens, top_p=0.9)
         # Fix #4: stop decoding at closing tags to avoid post-JSON prose.
         try:
@@ -355,7 +370,8 @@ def run_loop(
 
             if enable_terminal_stream and HAS_RICH and RICH_STDERR is not None and Live is not None:
                 with Live(build_status_renderable(iteration, phase="prefill", prompt_tokens=prompt_tokens, first_token_latency=None, generated_tokens=0, elapsed=0.0, tps=0.0, raw_preview=""), console=RICH_STDERR, refresh_per_second=8, transient=False) as live:
-                    for chunk in model.generate_stream(prompt, config=config):
+                    stream_generator = model.generate_stream_chat_with_messages(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
+                    for chunk in stream_generator:
                         if should_stop is not None and should_stop():
                             return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
                         text = str(chunk)
@@ -384,7 +400,8 @@ def run_loop(
                 last_decode_report = 0.0
                 if enable_terminal_stream:
                     prefill_stop, prefill_thread, _ = start_prefill_indicator(iteration, prompt_tokens)
-                for chunk in model.generate_stream(prompt, config=config):
+                stream_generator = model.generate_stream_chat_with_messages(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
+                for chunk in stream_generator:
                     if should_stop is not None and should_stop():
                         return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
                     text = str(chunk)
@@ -443,11 +460,17 @@ def run_loop(
                     generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
             raw = "".join(chunks).strip()
         else:
-            raw = getattr(model.generate(prompt, config=config), "text", "").strip()
+            raw = getattr(model.generate_chat_with_messages(messages, config=config) if use_chat else model.generate(prompt, config=config), "text", "").strip()
             if event_callback is not None:
                 event_callback({"type": "model_output", "iteration": iteration, "text": raw})
 
         generated_tokens = count_tokens(tokenizer, raw) if tokenizer is not None else None
+        if hasattr(model, "last_usage") and model.last_usage:
+            usage = model.last_usage
+            if usage.get("prompt_tokens"):
+                prompt_tokens = usage["prompt_tokens"]
+            if usage.get("completion_tokens"):
+                generated_tokens = usage["completion_tokens"]
         turn: dict[str, Any] = {
             "iteration": iteration,
             "raw": raw,

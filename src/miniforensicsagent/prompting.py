@@ -157,3 +157,118 @@ Task:
 Previous turns:
 {history}
 """
+
+
+def build_chat_messages(
+    task: str,
+    transcript: list[dict],
+    workspace: Path,
+    *,
+    current_plan: dict | None = None,
+    remaining_iterations: int | None = None,
+    reflection_hint: str = "",
+    multi_tool: bool = False,
+    available_skills: str = "",
+    active_skill_context: str = "",
+) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+
+    system_content = """You are a local codebase explorer.
+Use Claude Code style tool calls.
+Return exactly one thing each turn:
+- <tool_call>{"name":"Glob","arguments":{"pattern":"**/*.py","path":"."}}</tool_call>
+- or {"type":"plan","goal":"short sentence","steps":["step"],"done_when":"one short sentence"}
+- or {"type":"plan_update","completed_steps":["step"],"current_step":"step"}
+- or <final>{"answer":"done"}</final>
+No prose.
+
+Tools:
+- Read(file_path, offset=1, limit=80)
+- Glob(pattern, path=".")
+- Grep(pattern, path=".")
+- Bash(command) [allowed: pwd, ls, find, cat]
+- Write(file_path, content)
+- Edit(file_path, old_string, new_string)
+
+Forensics mode:
+- Treat the workspace as an evidence snapshot, not a live system.
+- Prefer direct evidence from executable code, runtime references, logs, and persisted config over helper scripts, docs, comments, and examples.
+- Distinguish weak clues from strong proof.
+- Keep the plan updated and use it to decide next actions.
+
+Rules:
+- Use relative paths.
+- One tool call per turn.
+- Read is paged by default. If you need more, read another range instead of assuming the whole file is visible.
+- Prefer Glob to discover files, Grep to locate lines, then Read a small window around the relevant line.
+- After a Grep hit, prefer Read(file_path=matched file, offset=matched line - 10, limit=30).
+- Do not default Read to offset=1 when Grep already identified a relevant line.
+- Do not keep increasing Read from offset=1 unless no line-targeted option exists.
+- If the last observation failed, fix it instead of finishing.
+- Goal is artifact discovery, not long explanation.
+
+First turn requirement:
+Return a plan JSON object and nothing else:
+{"type":"plan","goal":"short sentence","steps":["short step","short step"],"done_when":"one short sentence"}
+Do not call a tool on the first turn.
+
+Examples:
+{"type":"plan","goal":"find one config value","steps":["discover files","locate runtime usage","verify evidence"],"done_when":"one value is proven by runtime usage"}
+<tool_call>{"name":"Glob","arguments":{"pattern":"**/*.js","path":"."}}</tool_call>
+<tool_call>{"name":"Grep","arguments":{"pattern":"apiKey","path":".","glob":"**/*"}}</tool_call>
+<tool_call>{"name":"Read","arguments":{"file_path":"src/index.ts","offset":48,"limit":24}}</tool_call>
+{"type":"plan_update","completed_steps":["discover files"],"current_step":"locate runtime usage"}
+<tool_call>{"name":"Grep","arguments":{"pattern":"targetSymbol","path":".","glob":"**/*"}}</tool_call>
+<tool_call>{"name":"Read","arguments":{"file_path":"src/module.ts","offset":22,"limit":30}}</tool_call>
+<final>{"answer":"found the value and verified how it is used"}</final>"""
+
+    messages.append({"role": "system", "content": system_content})
+
+    for turn in transcript:
+        raw = turn.get("raw", "")
+        decision = turn.get("decision", {})
+        observations = turn.get("observations", [])
+
+        if decision.get("type") == "tool":
+            args = decision.get("arguments", {})
+            tool_name = decision.get("name", "")
+            tool_call_str = f'<tool_call>{{"name":"{tool_name}","arguments":{json.dumps(args)}}}</tool_call>'
+            messages.append({"role": "assistant", "content": tool_call_str})
+
+            for obs in observations:
+                if obs.get("ok"):
+                    content = obs.get("content", "")
+                    if len(content) > 2000:
+                        content = content[:2000] + f"\n... [truncated {len(content)-2000} chars]"
+                    messages.append({"role": "tool", "content": content})
+                else:
+                    messages.append({"role": "tool", "content": f"Error: {obs.get('error')}"})
+
+        elif decision.get("type") == "final":
+            messages.append({"role": "assistant", "content": raw})
+
+        elif decision.get("type") in ("plan", "plan_update"):
+            messages.append({"role": "assistant", "content": raw})
+
+    user_parts: list[str] = []
+
+    if current_plan:
+        user_parts.append(f"Current plan:\n{json.dumps(current_plan, ensure_ascii=False)}")
+
+    if remaining_iterations is not None and remaining_iterations <= 2:
+        user_parts.append(f"[Warning: Only {remaining_iterations} iteration{'s' if remaining_iterations > 1 else ''} remaining]")
+
+    user_parts.append(f"Task: {task}")
+
+    if reflection_hint:
+        user_parts.append(f"\nReflection: {reflection_hint}")
+
+    if available_skills:
+        user_parts.append(f"\nAvailable skills:\n{available_skills}")
+
+    if active_skill_context:
+        user_parts.append(f"\nActive skill context:\n{active_skill_context}")
+
+    messages.append({"role": "user", "content": "\n".join(user_parts)})
+
+    return messages

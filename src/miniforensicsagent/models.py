@@ -286,10 +286,11 @@ def prepare_effgen_imports():
 def load_llama_cpp_model(
     base_url: str = "http://localhost:8080/v1",
     model: str = "qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf",
+    use_chat: bool = False,
 ) -> tuple[Any, type]:
     from .llamacpp import LlamaCPPHTTPClient
 
-    client = LlamaCPPHTTPClient(base_url, model)
+    client = LlamaCPPHTTPClient(base_url, model, use_chat=use_chat)
     return client, _make_dummy_generation_config()
 
 
@@ -337,11 +338,13 @@ def load_local_model(
     *,
     llama_cpp_url: str | None = None,
     llama_cpp_model: str | None = None,
+    use_chat: bool = False,
 ):
     if engine == "llamacpp":
         return load_llama_cpp_model(
             base_url=llama_cpp_url or "http://localhost:8080/v1",
             model=llama_cpp_model or "qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf",
+            use_chat=use_chat,
         )
     GenerationConfig, load_model = prepare_effgen_imports()
     return load_model(str(model_path), engine="mlx"), GenerationConfig
