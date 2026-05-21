@@ -115,6 +115,7 @@ class LlamaCPPHTTPClient:
             timeout=self.timeout,
         )
         resp.raise_for_status()
+        last_timings: dict[str, Any] = {}
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -123,7 +124,7 @@ class LlamaCPPHTTPClient:
             if line.startswith("data: "):
                 raw = line[6:]
                 if raw.strip() == "[DONE]":
-                    return
+                    break
                 try:
                     obj = json.loads(raw)
                     choices = obj.get("choices", [{}])
@@ -133,12 +134,18 @@ class LlamaCPPHTTPClient:
                         yield content
                     if choices[0].get("finish_reason"):
                         timings = obj.get("timings", {})
+                        last_timings = timings
                         self.last_usage = {
                             "prompt_tokens": timings.get("prompt_n", 0),
                             "completion_tokens": timings.get("predicted_n", 0),
                         }
                 except json.JSONDecodeError:
                     continue
+        if self.last_usage is None and last_timings:
+            self.last_usage = {
+                "prompt_tokens": last_timings.get("prompt_n", 0),
+                "completion_tokens": last_timings.get("predicted_n", 0),
+            }
 
     def generate_stream_chat(self, prompt: str, config: Any) -> Generator[str, None, None]:
         raise NotImplementedError("use generate_stream_chat_with_messages() instead")

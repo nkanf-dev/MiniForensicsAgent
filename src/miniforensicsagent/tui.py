@@ -47,6 +47,7 @@ class TuiConfig:
     compress_observations: bool = False
     transcript_window: int | None = None
     multi_tool: bool = False
+    use_chat: bool = False
 
 
 def _parse_optional_int(raw: str) -> int | None:
@@ -131,6 +132,7 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 yield self._row("[exp] Compress Obs", Checkbox(label="Enable", value=self.config.compress_observations, id="p_compress_obs"))
                 yield self._row("[exp] Transcript Window", Input("" if self.config.transcript_window is None else str(self.config.transcript_window), id="p_transcript_window"))
                 yield self._row("[exp] Multi-Tool", Checkbox(label="Enable", value=self.config.multi_tool, id="p_multi_tool"))
+                yield self._row("Use Chat", Checkbox(label="Enable", value=self.config.use_chat, id="p_use_chat"))
             with Horizontal():
                 yield Button("Save", id="save", variant="success")
                 yield Button("Cancel", id="cancel")
@@ -162,6 +164,7 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 "compress_observations": self.query_one("#p_compress_obs", Checkbox).value,
                 "transcript_window": _parse_optional_int(self.query_one("#p_transcript_window", Input).value),
                 "multi_tool": self.query_one("#p_multi_tool", Checkbox).value,
+                "use_chat": self.query_one("#p_use_chat", Checkbox).value,
             }
         except Exception as exc:
             self.notify(f"Invalid params: {exc}", severity="error")
@@ -676,6 +679,7 @@ class ForensicsTuiApp(App):
                 compress_observations=self.config.compress_observations,
                 transcript_window=self.config.transcript_window,
                 multi_tool=self.config.multi_tool,
+                use_chat=self.config.use_chat,
             )
             elapsed = round(time.perf_counter() - started, 3)
             if self.cancel_requested or result.answer == "cancelled":

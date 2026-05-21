@@ -47,6 +47,7 @@ class GuiConfig:
     compress_observations: bool = False
     transcript_window: int | None = None
     multi_tool: bool = False
+    use_chat: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +484,7 @@ def index_page() -> None:
                     compress_observations=state.config.compress_observations,
                     transcript_window=state.config.transcript_window,
                     multi_tool=state.config.multi_tool,
+                    use_chat=state.config.use_chat,
                 )
                 elapsed = round(time.perf_counter() - started, 3)
 
@@ -595,6 +597,7 @@ def index_page() -> None:
             with ui.row():
                 p_compress = ui.checkbox("[exp] Compress Observations", value=cfg.compress_observations)
                 p_multi_tool = ui.checkbox("[exp] Multi-Tool", value=cfg.multi_tool)
+            p_use_chat = ui.checkbox("Use Chat", value=cfg.use_chat)
             p_tw = ui.input(
                 "[exp] Transcript Window (blank = off)",
                 value="" if cfg.transcript_window is None else str(cfg.transcript_window),
@@ -620,6 +623,7 @@ def index_page() -> None:
                             compress_observations=p_compress.value,
                             transcript_window=_parse_optional_int(p_tw.value),
                             multi_tool=p_multi_tool.value,
+                            use_chat=p_use_chat.value,
                         )
                         n = state.reload_models()
                         add_chat_card(

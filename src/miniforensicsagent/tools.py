@@ -239,7 +239,9 @@ def run_tool(
                     for item in root.rglob(base_pattern):
                         if item.is_file():
                             try:
-                                matches.append(str(item.relative_to(workspace)))
+                                rel = item.relative_to(root)
+                                rel_str = "/".join(rel.parts)
+                                matches.append(rel_str)
                             except ValueError:
                                 continue
                 matches = sorted(dict.fromkeys(matches))
@@ -319,8 +321,10 @@ def run_tool(
                 for item in root.rglob("*"):
                     if not item.is_file():
                         continue
-                    rel = str(item.relative_to(root))
-                    if not any(fnmatch.fnmatch(rel, g) for g in glob_patterns):
+                    rel_path = item.relative_to(root)
+                    rel = "/".join(rel_path.parts)
+                    name = item.name
+                    if not any(fnmatch.fnmatch(name, g.replace("**/", "").replace("**", "*")) for g in glob_patterns):
                         continue
                     try:
                         content = item.read_text(encoding="utf-8", errors="replace")

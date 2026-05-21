@@ -204,7 +204,7 @@ def list_skill_resources(skill_dir: Path) -> list[str]:
         if path.name == "SKILL.md":
             continue
         try:
-            rel = str(path.relative_to(skill_dir))
+            rel = str(path.relative_to(skill_dir)).replace("\\", "/")
         except ValueError:
             continue
         resources.append(rel)
