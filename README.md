@@ -1,6 +1,6 @@
 # MiniForensicsAgent
 
-A small local forensics-style explorer loop for MLX models.
+A small local forensics-style explorer loop for local LLMs (MLX and llama.cpp).
 
 ## What it does
 
@@ -26,6 +26,8 @@ uv sync --extra turboquant
 
 ## Run
 
+### MLX models (Apple Silicon)
+
 ```bash
 uv run mini-forensics-agent \
   --model 'LocoOperator-4B-mlx-4Bit' \
@@ -34,13 +36,48 @@ uv run mini-forensics-agent \
   --stream
 ```
 
-Or use the helper script:
+### llama.cpp (any platform)
 
 ```bash
-./scripts/run-mini-forensics-agent --help
+# Plain completion API
+uv run mini-forensics-agent \
+  --engine llamacpp \
+  --llama-cpp-url http://localhost:8080/v1 \
+  --llama-cpp-model qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf \
+  --workspace /path/to/workspace \
+  --task 'Find the actual config used by this app.' \
+  --stream
+
+# Chat API (with Jinja/chat template models)
+uv run mini-forensics-agent \
+  --engine llamacpp \
+  --use-chat \
+  --llama-cpp-url http://localhost:8080/v1 \
+  --llama-cpp-model qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf \
+  --workspace /path/to/workspace \
+  --task 'Find the actual config used by this app.' \
+  --stream
 ```
 
-Experimental Agent Skills scaffold:
+List available models:
+```bash
+uv run mini-forensics-agent --list-models
+```
+
+## TUI
+
+```bash
+uv run mini-forensics-agent-tui
+```
+
+TUI keys:
+- `r` run task
+- `s` stop current run
+- `n` new conversation
+- `p` open parameter popup
+- `q` quit
+
+## Experimental Agent Skills
 
 ```bash
 uv run mini-forensics-agent \
@@ -72,16 +109,3 @@ description: One-line summary of when the skill should be used
 Useful skill commands:
 - `uv run mini-forensics-agent --workspace /path/to/workspace --list-skills`
 - `uv run mini-forensics-agent --workspace /path/to/workspace --enable-skills --skill-dir /extra/skills ...`
-
-## TUI
-
-```bash
-uv run mini-forensics-agent-tui
-```
-
-TUI keys:
-- `r` run task
-- `s` stop current run
-- `n` new conversation
-- `p` open parameter popup
-- `q` quit
