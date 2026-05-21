@@ -32,15 +32,21 @@ uv run mini-forensics-agent-tui
 # List available models from llama.cpp server
 uv run mini-forensics-agent --engine llamacpp --list-models
 
-# Run with llama.cpp server
-uv run mini-forensics-agent --engine llamacpp --task "..." --workspace .
-# Or specify URL and model explicitly:
+# Run with llama.cpp server (plain completion API)
 uv run mini-forensics-agent --engine llamacpp --llama-cpp-url http://localhost:8080/v1 --llama-cpp-model YOUR_MODEL.gguf --task "..." --workspace .
+
+# Run with chat API (Jinja/chat template models)
+uv run mini-forensics-agent --engine llamacpp --use-chat --llama-cpp-url http://localhost:8080/v1 --llama-cpp-model YOUR_MODEL.gguf --task "..." --workspace . --stream
 ```
 - Default URL: `http://localhost:8080/v1`
 - Default model: `qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf`
-- Uses OpenAI-compatible `/v1/completions` endpoint
+- Plain mode: uses `/v1/completions` endpoint
+- Chat mode (`--use-chat`): uses `/v1/chat/completions` with OpenAI-style messages
 - `tokenizer = None` (no token counting, `--stream` recommended for live output)
+
+### Windows compatibility
+- Glob/Grep: uses Python fallback when ripgrep (`rg`) is not available
+- Bash: translates common commands (`pwd`→`cd`, `ls`→`dir`, `cat`→`type`, etc.)
 
 ## Tools quirks
 - `Read` offset is **1-indexed**
