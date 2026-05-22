@@ -14,7 +14,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, ListItem, ListView, Static
+from textual.widgets import Button, Checkbox, Input, Label, ListItem, ListView, Select, Static
 from textual.worker import Worker
 
 from .loop import run_loop
@@ -32,6 +32,9 @@ from .models import (
 class TuiConfig:
     model: str = "LocoOperator"
     model_root: str = str(DEFAULT_MODEL_ROOT)
+    engine: str = "mlx"
+    llama_cpp_url: str = "http://localhost:8080/v1"
+    llama_cpp_model: str = "qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf"
     workspace: str = str(DEFAULT_AGENT_WORKSPACE)
     max_iterations: int = 12
     max_tokens: int = 768
@@ -43,11 +46,11 @@ class TuiConfig:
     turboquant: bool = False
     tq_r_bits: int = 4
     tq_theta_bits: int = 4
+    use_chat: bool = False
     # Experimental
     compress_observations: bool = False
     transcript_window: int | None = None
     multi_tool: bool = False
-    use_chat: bool = False
 
 
 def _parse_optional_int(raw: str) -> int | None:
@@ -119,6 +122,15 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 yield self._row("Model", Input(self.config.model, id="p_model"))
                 yield self._row("Model Root", Input(self.config.model_root, id="p_model_root"))
                 yield self._row("Workspace", Input(self.config.workspace, id="p_workspace"))
+                engine_select = Select(
+                    id="p_engine",
+                    options=["mlx", "llamacpp"],
+                    value=self.config.engine,
+                )
+                yield self._row("Engine", engine_select)
+                yield Static("=== llama.cpp Parameters ===", id="llama-params-label")
+                yield self._row("LLamaCpp URL", Input(self.config.llama_cpp_url, id="p_llama_cpp_url"))
+                yield self._row("LLamaCpp Model", Input(self.config.llama_cpp_model, id="p_llama_cpp_model"))
                 yield self._row("Max Iterations", Input(str(self.config.max_iterations), id="p_max_iterations"))
                 yield self._row("Max Tokens", Input(str(self.config.max_tokens), id="p_max_tokens"))
                 yield self._row("Temperature", Input(str(self.config.temperature), id="p_temperature"))
@@ -129,10 +141,10 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 yield self._row("TurboQuant", Checkbox(label="Enable", value=self.config.turboquant, id="p_turboquant"))
                 yield self._row("TQ r_bits", Input(str(self.config.tq_r_bits), id="p_tq_r_bits"))
                 yield self._row("TQ theta_bits", Input(str(self.config.tq_theta_bits), id="p_tq_theta_bits"))
+                yield self._row("Use Chat", Checkbox(label="Enable", value=self.config.use_chat, id="p_use_chat"))
                 yield self._row("[exp] Compress Obs", Checkbox(label="Enable", value=self.config.compress_observations, id="p_compress_obs"))
                 yield self._row("[exp] Transcript Window", Input("" if self.config.transcript_window is None else str(self.config.transcript_window), id="p_transcript_window"))
                 yield self._row("[exp] Multi-Tool", Checkbox(label="Enable", value=self.config.multi_tool, id="p_multi_tool"))
-                yield self._row("Use Chat", Checkbox(label="Enable", value=self.config.use_chat, id="p_use_chat"))
             with Horizontal():
                 yield Button("Save", id="save", variant="success")
                 yield Button("Cancel", id="cancel")
@@ -151,6 +163,9 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 "model": self.query_one("#p_model", Input).value.strip(),
                 "model_root": self.query_one("#p_model_root", Input).value.strip(),
                 "workspace": self.query_one("#p_workspace", Input).value.strip(),
+                "engine": self.query_one("#p_engine", Select).value,
+                "llama_cpp_url": self.query_one("#p_llama_cpp_url", Input).value.strip(),
+                "llama_cpp_model": self.query_one("#p_llama_cpp_model", Input).value.strip(),
                 "max_iterations": int(self.query_one("#p_max_iterations", Input).value.strip()),
                 "max_tokens": int(self.query_one("#p_max_tokens", Input).value.strip()),
                 "temperature": float(self.query_one("#p_temperature", Input).value.strip()),
@@ -161,10 +176,10 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 "turboquant": self.query_one("#p_turboquant", Checkbox).value,
                 "tq_r_bits": int(self.query_one("#p_tq_r_bits", Input).value.strip()),
                 "tq_theta_bits": int(self.query_one("#p_tq_theta_bits", Input).value.strip()),
+                "use_chat": True if self.query_one("#p_engine", Select).value == "llamacpp" else self.query_one("#p_use_chat", Checkbox).value,
                 "compress_observations": self.query_one("#p_compress_obs", Checkbox).value,
                 "transcript_window": _parse_optional_int(self.query_one("#p_transcript_window", Input).value),
                 "multi_tool": self.query_one("#p_multi_tool", Checkbox).value,
-                "use_chat": self.query_one("#p_use_chat", Checkbox).value,
             }
         except Exception as exc:
             self.notify(f"Invalid params: {exc}", severity="error")
@@ -236,6 +251,7 @@ class ForensicsTuiApp(App):
         self.current_conv_index = 0
         self.models: list[Any] = []
         self.loaded_model_path: str | None = None
+        self.loaded_engine_key: str | None = None
         self.loaded_model: Any = None
         self.generation_config_factory: Any = None
         self.active_worker: Worker | None = None
@@ -409,12 +425,22 @@ class ForensicsTuiApp(App):
 
     def _ensure_model_loaded(self, selected_path: Path) -> None:
         current = str(selected_path.resolve())
-        if self.loaded_model is not None and self.loaded_model_path == current:
+        engine_key = f"{self.config.engine}:{self.config.llama_cpp_url}:{self.config.llama_cpp_model}"
+        if self.loaded_model is not None and self.loaded_model_path == current and self.loaded_engine_key == engine_key:
             return
-        model, generation_config_factory = load_local_model(selected_path)
+        if self.config.engine == "llamacpp":
+            model, generation_config_factory = load_local_model(
+                None,
+                engine="llamacpp",
+                llama_cpp_url=self.config.llama_cpp_url,
+                llama_cpp_model=self.config.llama_cpp_model,
+            )
+        else:
+            model, generation_config_factory = load_local_model(selected_path)
         self.loaded_model = model
         self.generation_config_factory = generation_config_factory
         self.loaded_model_path = current
+        self.loaded_engine_key = engine_key
 
     @on(Button.Pressed, "#new")
     def _new_button(self) -> None:

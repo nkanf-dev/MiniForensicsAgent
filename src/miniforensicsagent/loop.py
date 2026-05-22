@@ -401,6 +401,8 @@ def run_loop(
                 if enable_terminal_stream:
                     prefill_stop, prefill_thread, _ = start_prefill_indicator(iteration, prompt_tokens)
                 stream_generator = model.generate_stream_chat(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
+                import sys
+                print(f"[DEBUG loop] iteration={iteration} use_chat={use_chat} stream_generator={stream_generator}", file=sys.stderr, flush=True)
                 for chunk in stream_generator:
                     if should_stop is not None and should_stop():
                         return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
@@ -460,7 +462,10 @@ def run_loop(
                     generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
             raw = "".join(chunks).strip()
         else:
+            import sys
+            print(f"[DEBUG loop else] iteration={iteration} use_chat={use_chat}", file=sys.stderr, flush=True)
             raw = getattr(model.generate_chat(messages, config=config) if use_chat else model.generate(prompt, config=config), "text", "").strip()
+            print(f"[DEBUG loop else] raw length={len(raw)} raw[:100]={repr(raw[:100])}", file=sys.stderr, flush=True)
             if event_callback is not None:
                 event_callback({"type": "model_output", "iteration": iteration, "text": raw})
 

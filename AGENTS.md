@@ -3,7 +3,7 @@
 ## Dev setup
 ```bash
 uv sync
-uv run pytest                    # all tests (24 passing)
+uv run pytest                    # all tests (25 passing, 1 skipped)
 uv run pytest tests/test_prompting.py  # single test file
 ```
 
@@ -28,10 +28,17 @@ uv run mini-forensics-agent-gui
 - Skills: `skills.py`
 - Model loading: `models.py`, `llamacpp.py`
 
+## GUI / TUI Parameters
+- Engine selector: dropdown/radio (MLX / llama.cpp)
+- llama.cpp URL, model, use_chat always visible
+- When engine=llamacpp: **use_chat is forced True** in both GUI and TUI
+- GUI conversation list: click × to delete single conversation
+
 ## llama.cpp backend
 - Default: `--llama-cpp-url http://localhost:8080/v1`
-- Plain mode (`--engine llamacpp` without `--use-chat`): `/v1/completions`
-- Chat mode (`--use-chat`): `/v1/chat/completions` with OpenAI-style messages
+- Chat mode (`--use-chat`): `/v1/chat/completions` with jinja template → structured `<final>` output
+- Plain mode (`--use-chat` omitted): `/v1/completions` → pure text continuation, **cannot produce structured output**
+- **llama.cpp use_chat must be True** for agent loop to parse `<final>` / `<tool_call>` tags
 - `--stream` recommended for live token output
 
 ## Windows compatibility
@@ -56,3 +63,9 @@ uv run mini-forensics-agent-gui
 - `--compress-observations` — compress transcript
 - `--transcript-window K` — limit transcript to last K turns
 - `--turboquant` — KV cache quantization (requires `uv sync --extra turboquant`)
+
+## Conversation persistence
+- Stored in `.mini_forensics_conversations.json` (in working directory)
+- Auto-saved on every run completion
+- Auto-loaded on GUI/TUI startup
+- GUI: click × on conversation card to delete

@@ -32,6 +32,9 @@ from .models import (
 class GuiConfig:
     model: str = "LocoOperator"
     model_root: str = str(DEFAULT_MODEL_ROOT)
+    engine: str = "mlx"
+    llama_cpp_url: str = "http://localhost:8080/v1"
+    llama_cpp_model: str = "qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf"
     workspace: str = str(DEFAULT_AGENT_WORKSPACE)
     max_iterations: int = 12
     max_tokens: int = 768
@@ -43,11 +46,11 @@ class GuiConfig:
     turboquant: bool = False
     tq_r_bits: int = 4
     tq_theta_bits: int = 4
+    use_chat: bool = False
     # Experimental
     compress_observations: bool = False
     transcript_window: int | None = None
     multi_tool: bool = False
-    use_chat: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +85,7 @@ class SessionState:
         self.current_conv_index: int = 0
         self.models: list[Any] = []
         self.loaded_model_path: str | None = None
+        self.loaded_engine_key: str | None = None
         self.loaded_model: Any = None
         self.generation_config_factory: Any = None
         self.running: bool = False
@@ -133,6 +137,15 @@ class SessionState:
         self.save_conversations()
         return len(self.conversations) - 1
 
+    def delete_conversation(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self.conversations):
+            return
+        self.conversations.pop(idx)
+        self.save_conversations()
+        if not self.conversations:
+            self.new_conversation()
+        self.current_conv_index = min(idx, len(self.conversations) - 1)
+
     # -- model ---------------------------------------------------------------
 
     def reload_models(self) -> int:
@@ -148,12 +161,22 @@ class SessionState:
 
     def ensure_model_loaded(self, selected_path: Path) -> None:
         current = str(selected_path.resolve())
-        if self.loaded_model is not None and self.loaded_model_path == current:
+        engine_key = f"{self.config.engine}:{self.config.llama_cpp_url}:{self.config.llama_cpp_model}"
+        if self.loaded_model is not None and self.loaded_model_path == current and self.loaded_engine_key == engine_key:
             return
-        model, gen_cfg = load_local_model(selected_path)
+        if self.config.engine == "llamacpp":
+            model, gen_cfg = load_local_model(
+                None,
+                engine="llamacpp",
+                llama_cpp_url=self.config.llama_cpp_url,
+                llama_cpp_model=self.config.llama_cpp_model,
+            )
+        else:
+            model, gen_cfg = load_local_model(selected_path)
         self.loaded_model = model
         self.generation_config_factory = gen_cfg
         self.loaded_model_path = current
+        self.loaded_engine_key = engine_key
 
 
 # ---------------------------------------------------------------------------
@@ -236,8 +259,16 @@ def index_page() -> None:
         with ui.card().style(
             "width:100%; cursor:pointer; margin-bottom:4px;"
         ).on("click", lambda _e, i=idx: select_conversation(i)):
-            ui.label(title).style("font-weight:bold; font-size:0.85rem;")
-            ui.label(subtitle).style("font-size:0.7rem; color:#999;")
+            with ui.row().style("width:100%; align-items:center;"):
+                with ui.column().style("width:100%;"):
+                    ui.label(title).style("font-weight:bold; font-size:0.85rem;")
+                    ui.label(subtitle).style("font-size:0.7rem; color:#999;")
+                ui.button("×", on_click=lambda _e, i=idx: do_delete_conversation(i)).props("flat color=red size=sm")
+
+    def do_delete_conversation(idx: int) -> None:
+        state.delete_conversation(idx)
+        rebuild_conversation_list()
+        select_conversation(state.current_conv_index)
 
     def select_conversation(idx: int) -> None:
         if idx < 0 or idx >= len(state.conversations):
@@ -308,10 +339,15 @@ def index_page() -> None:
     # ---------------------------------------------------------------
 
     def drain_ui_queue() -> None:
+        import sys
         try:
+            count = 0
             while True:
                 fn = state.ui_queue.get_nowait()
+                count += 1
                 fn()
+            if count > 0:
+                print(f"[DEBUG drain_ui_queue] processed {count} items", file=sys.stderr, flush=True)
         except _queue.Empty:
             pass
 
@@ -322,9 +358,12 @@ def index_page() -> None:
     def on_event(event: dict[str, Any]) -> None:
         kind = str(event.get("type", ""))
         iteration = event.get("iteration", "?")
+        import sys
+        print(f"[DEBUG on_event] kind={kind} iteration={iteration}", file=sys.stderr, flush=True)
 
         if kind == "stream_chunk":
             chunk = str(event.get("chunk", ""))
+            print(f"[DEBUG stream_chunk] chunk={repr(chunk[:50])}", file=sys.stderr, flush=True)
             if chunk:
                 state.stream_buffer += chunk
             return
@@ -360,6 +399,22 @@ def index_page() -> None:
         if kind == "plan_state":
             state.dashboard["plan"] = event.get("plan", {})
             state.ui_queue.put(refresh_plan)
+            return
+
+        if kind == "model_output":
+            import sys
+            text = str(event.get("text", ""))
+            print(f"[DEBUG model_output] text length={len(text)} text={repr(text[:100])}", file=sys.stderr, flush=True)
+            if text:
+                state.stream_buffer += text
+            buf = state.stream_buffer.strip()
+            print(f"[DEBUG model_output] stream_buffer len={len(state.stream_buffer)} buf len={len(buf)}", file=sys.stderr, flush=True)
+            if buf:
+                preview = buf[-800:]
+                state.ui_queue.put(
+                    lambda p=preview: add_chat_card("assistant", f"```\n{p}\n```")
+                )
+                state.stream_buffer = ""
             return
 
         if kind == "observation":
@@ -419,6 +474,8 @@ def index_page() -> None:
 
     def _q(kind: str, text: str) -> None:
         """Enqueue an add_chat_card call (thread-safe)."""
+        import sys
+        print(f"[DEBUG _q] kind={kind} text={repr(text[:100])}", file=sys.stderr, flush=True)
         state.ui_queue.put(lambda k=kind, t=text: add_chat_card(k, t))
 
     def do_run() -> None:
@@ -441,10 +498,15 @@ def index_page() -> None:
 
         def worker() -> None:
             started = time.perf_counter()
+            import traceback
             try:
-                selected = state.resolve_model()
-                _q("system", f"Model: **{selected.name}**")
-                state.ensure_model_loaded(selected.path)
+                if state.config.engine == "llamacpp":
+                    _q("system", f"Model: **{state.config.llama_cpp_model}**")
+                    state.ensure_model_loaded(Path(""))
+                else:
+                    selected = state.resolve_model()
+                    _q("system", f"Model: **{selected.name}**")
+                    state.ensure_model_loaded(selected.path)
                 if state.config.turboquant:
                     patch_mlx_lm_prompt_cache_with_turboquant(
                         r_bits=state.config.tq_r_bits,
@@ -513,7 +575,8 @@ def index_page() -> None:
                     f"{result.iterations} iterations, {result.tool_calls} tool calls",
                 )
             except Exception as exc:
-                _q("error", f"**Run failed:** {type(exc).__name__}: {exc}")
+                tb = traceback.format_exc()
+                _q("error", f"**Run failed:** {type(exc).__name__}: {exc}\n\n```\n{tb}\n```")
             finally:
                 state.running = False
 
@@ -547,6 +610,18 @@ def index_page() -> None:
             p_model_root = ui.input("Model Root", value=cfg.model_root).style("width:100%;")
             p_workspace = ui.input("Workspace", value=cfg.workspace).style("width:100%;")
 
+            ui.label("Engine").style("font-weight:bold; margin-top:8px;")
+            p_engine = ui.radio({"mlx": "MLX", "llamacpp": "llama.cpp"}, value=cfg.engine)
+
+            ui.separator()
+            ui.label("=== llama.cpp Parameters ===").style("font-weight:bold; margin-top:8px;")
+            p_llama_url = ui.input("LlamaCpp URL", value=cfg.llama_cpp_url).style("width:100%;")
+            p_llama_model = ui.input("LlamaCpp Model", value=cfg.llama_cpp_model).style("width:100%;")
+            initial_use_chat = True if cfg.engine == "llamacpp" else cfg.use_chat
+            ui.label("llama.cpp requires Use Chat=True for structured output").style("font-size:0.75rem; color:#888; margin-bottom:4px;")
+            p_use_chat = ui.checkbox("Use Chat", value=initial_use_chat)
+
+            ui.separator()
             with ui.row():
                 p_max_iter = ui.number(
                     "Max Iterations", value=cfg.max_iterations, min=1, max=100, step=1
@@ -597,7 +672,7 @@ def index_page() -> None:
             with ui.row():
                 p_compress = ui.checkbox("[exp] Compress Observations", value=cfg.compress_observations)
                 p_multi_tool = ui.checkbox("[exp] Multi-Tool", value=cfg.multi_tool)
-            p_use_chat = ui.checkbox("Use Chat", value=cfg.use_chat)
+
             p_tw = ui.input(
                 "[exp] Transcript Window (blank = off)",
                 value="" if cfg.transcript_window is None else str(cfg.transcript_window),
@@ -606,9 +681,16 @@ def index_page() -> None:
             with ui.row().style("margin-top:16px;"):
                 def save() -> None:
                     try:
+                        engine = p_engine.value
+                        use_chat = p_use_chat.value
+                        if engine == "llamacpp":
+                            use_chat = True
                         state.config = GuiConfig(
                             model=p_model.value.strip(),
                             model_root=p_model_root.value.strip(),
+                            engine=p_engine.value,
+                            llama_cpp_url=p_llama_url.value.strip(),
+                            llama_cpp_model=p_llama_model.value.strip(),
                             workspace=p_workspace.value.strip(),
                             max_iterations=int(p_max_iter.value),
                             max_tokens=int(p_max_tok.value),
@@ -620,10 +702,10 @@ def index_page() -> None:
                             turboquant=p_tq.value,
                             tq_r_bits=int(p_tq_r.value),
                             tq_theta_bits=int(p_tq_t.value),
+                            use_chat=use_chat,
                             compress_observations=p_compress.value,
                             transcript_window=_parse_optional_int(p_tw.value),
                             multi_tool=p_multi_tool.value,
-                            use_chat=p_use_chat.value,
                         )
                         n = state.reload_models()
                         add_chat_card(
