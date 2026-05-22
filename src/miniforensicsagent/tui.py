@@ -283,7 +283,7 @@ class ForensicsTuiApp(App):
                         yield Button("New", id="new", variant="primary")
                         yield Button("Params", id="params")
                         yield Button("Copy", id="copy")
-                        yield Button("Delete", id="delete", variant="error")
+                    yield Button("Delete", id="delete", variant="error")
                     yield ListView(id="conv-list")
                 with Vertical(id="middle"):
                     yield Static("Agent Chat", classes="title")
