@@ -15,18 +15,32 @@ class LlamaCPPHTTPClient:
         self.model = model
         self.timeout = timeout
 
-    def _build_payload(self, prompt: str, config: Any, stream: bool = False) -> dict[str, Any]:
+    def generate_chat(self, messages: list[dict[str, str]], config: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
-            "prompt": prompt,
-            "stream": stream,
+            "messages": messages,
+            "stream": False,
             "temperature": getattr(config, "temperature", 0.3),
             "max_tokens": getattr(config, "max_tokens", 768),
             "top_p": getattr(config, "top_p", 0.9),
         }
-        return payload
+        resp = requests.post(
+            f"{self.base_url}/chat/completions",
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices", [{}])
+        content = choices[0].get("message", {}).get("content", "") or choices[0].get("text", "")
+        timings = data.get("timings", {})
+        self.last_usage = {
+            "prompt_tokens": timings.get("prompt_n", 0),
+            "completion_tokens": timings.get("predicted_n", 0),
+        }
+        return {"text": content}
 
-    def generate_stream_chat_with_messages(self, messages: list[dict[str, str]], config: Any) -> Generator[str, None, None]:
+    def generate_stream_chat(self, messages: list[dict[str, str]], config: Any) -> Generator[str, None, None]:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -73,9 +87,3 @@ class LlamaCPPHTTPClient:
                 "prompt_tokens": last_timings.get("prompt_n", 0),
                 "completion_tokens": last_timings.get("predicted_n", 0),
             }
-
-    def generate_stream_chat(self, prompt: str, config: Any) -> Generator[str, None, None]:
-        raise NotImplementedError("use generate_stream_chat_with_messages() instead")
-
-    def generate_chat(self, prompt: str, config: Any) -> dict[str, Any]:
-        raise NotImplementedError("use generate_chat_with_messages() instead")

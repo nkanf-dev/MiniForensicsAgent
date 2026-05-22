@@ -370,7 +370,7 @@ def run_loop(
 
             if enable_terminal_stream and HAS_RICH and RICH_STDERR is not None and Live is not None:
                 with Live(build_status_renderable(iteration, phase="prefill", prompt_tokens=prompt_tokens, first_token_latency=None, generated_tokens=0, elapsed=0.0, tps=0.0, raw_preview=""), console=RICH_STDERR, refresh_per_second=8, transient=False) as live:
-                    stream_generator = model.generate_stream_chat_with_messages(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
+                    stream_generator = model.generate_stream_chat(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
                     for chunk in stream_generator:
                         if should_stop is not None and should_stop():
                             return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
@@ -400,7 +400,7 @@ def run_loop(
                 last_decode_report = 0.0
                 if enable_terminal_stream:
                     prefill_stop, prefill_thread, _ = start_prefill_indicator(iteration, prompt_tokens)
-                stream_generator = model.generate_stream_chat_with_messages(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
+                stream_generator = model.generate_stream_chat(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
                 for chunk in stream_generator:
                     if should_stop is not None and should_stop():
                         return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
@@ -460,7 +460,7 @@ def run_loop(
                     generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
             raw = "".join(chunks).strip()
         else:
-            raw = getattr(model.generate_chat_with_messages(messages, config=config) if use_chat else model.generate(prompt, config=config), "text", "").strip()
+            raw = getattr(model.generate_chat(messages, config=config) if use_chat else model.generate(prompt, config=config), "text", "").strip()
             if event_callback is not None:
                 event_callback({"type": "model_output", "iteration": iteration, "text": raw})
 
