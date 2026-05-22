@@ -283,6 +283,7 @@ class ForensicsTuiApp(App):
                         yield Button("New", id="new", variant="primary")
                         yield Button("Params", id="params")
                         yield Button("Copy", id="copy")
+                        yield Button("Delete", id="delete", variant="error")
                     yield ListView(id="conv-list")
                 with Vertical(id="middle"):
                     yield Static("Agent Chat", classes="title")
@@ -341,6 +342,18 @@ class ForensicsTuiApp(App):
         self.conversations.append(conv)
         self._save_conversations()
         return len(self.conversations) - 1
+
+    def _delete_conversation(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self.conversations):
+            return
+        if len(self.conversations) == 1:
+            self.notify("Cannot delete the last conversation", severity="warning")
+            return
+        self.conversations.pop(idx)
+        self._save_conversations()
+        self.current_conv_index = min(idx, len(self.conversations) - 1)
+        self._refresh_conversation_list()
+        self._select_conversation(self.current_conv_index)
 
     def _refresh_conversation_list(self) -> None:
         view = self.query_one("#conv-list", ListView)
@@ -453,6 +466,10 @@ class ForensicsTuiApp(App):
     @on(Button.Pressed, "#copy")
     def _copy_button(self) -> None:
         self.action_copy_card()
+
+    @on(Button.Pressed, "#delete")
+    def _delete_button(self) -> None:
+        self._delete_conversation(self.current_conv_index)
 
     @on(Button.Pressed, "#run")
     def _run_button(self) -> None:
