@@ -26,7 +26,16 @@ def build_prompt(
 {"type":"plan_update","completed_steps":["discover files"],"current_step":"locate runtime usage"}
 <tool_call>{"name":"Grep","arguments":{"pattern":"targetSymbol","path":".","glob":"**/*"}}</tool_call>
 <tool_call>{"name":"Read","arguments":{"file_path":"src/module.ts","offset":22,"limit":30}}</tool_call>
-<final>{"answer":"found the value and verified how it is used"}</final>"""
+<final>{"answer":"found the value and verified how it is used"}</final>
+
+Final answer examples - ALWAYS use <final> tag:
+<final>{"answer":"The config value is 'debug mode' found in config.py line 42"}</final>
+<final>{"answer":"2+2 equals 4"}</final>
+<final>{"answer":"API endpoint is /api/v1/users based on route definition"}</final>
+
+When you have completed the task and found the answer, you MUST output:
+<final>{"answer":"your answer here"}</final>
+Do NOT output plain text. Do NOT output explanations before <final>."""
     plan_block = ""
     if current_plan:
         plan_block = (
