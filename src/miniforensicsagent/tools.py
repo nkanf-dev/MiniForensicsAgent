@@ -30,17 +30,7 @@ BASH_TRANSLATIONS: dict[str, str] = {
     "ls -la": "dir /a" if IS_WINDOWS else "ls -la",
     "cat": "type",
     "find": "dir /s /b" if IS_WINDOWS else "find",
-    "which": "where" if IS_WINDOWS else "which",
-    "cp": "copy" if IS_WINDOWS else "cp",
-    "mv": "move" if IS_WINDOWS else "mv",
-    "rm": "del /f" if IS_WINDOWS else "rm",
-    "mkdir": "mkdir",
-    "rmdir": "rmdir",
     "clear": "cls" if IS_WINDOWS else "clear",
-    "echo": "echo",
-    "head": "more +1" if IS_WINDOWS else "head",
-    "tail": "powershell -c \"Get-Content file | Select-Object -Last N\"" if IS_WINDOWS else "tail",
-    "wc": "findstr /r" if IS_WINDOWS else "wc",
 }
 
 
