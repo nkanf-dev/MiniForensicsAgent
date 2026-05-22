@@ -124,7 +124,7 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 yield self._row("Workspace", Input(self.config.workspace, id="p_workspace"))
                 engine_select = Select(
                     id="p_engine",
-                    options=["mlx", "llamacpp"],
+                    options=[("MLX", "mlx"), ("llama.cpp", "llamacpp")],
                     value=self.config.engine,
                 )
                 yield self._row("Engine", engine_select)
