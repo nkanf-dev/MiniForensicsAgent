@@ -669,9 +669,15 @@ class ForensicsTuiApp(App):
     def _run_impl(self, msg: str) -> None:
         started = time.perf_counter()
         try:
-            selected = self._resolve_model()
-            self.call_from_thread(self._mount_status_card, "system", f"Model: {selected.name}")
-            self._ensure_model_loaded(selected.path)
+            if self.config.engine == "llamacpp":
+                selected_name = self.config.llama_cpp_model
+                self.call_from_thread(self._mount_status_card, "system", f"Model: {selected_name}")
+                self._ensure_model_loaded(Path(""))
+            else:
+                selected = self._resolve_model()
+                selected_name = selected.name
+                self.call_from_thread(self._mount_status_card, "system", f"Model: {selected_name}")
+                self._ensure_model_loaded(selected.path)
             if self.config.turboquant:
                 patch_mlx_lm_prompt_cache_with_turboquant(r_bits=self.config.tq_r_bits, theta_bits=self.config.tq_theta_bits)
                 self.call_from_thread(self._mount_status_card, "system", "TurboQuant enabled")
