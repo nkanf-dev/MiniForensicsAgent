@@ -44,9 +44,14 @@ The `normalize_response()` function (loop.py:164) determines response type:
 ## Doom loop detection
 - Trigger: same tool + same args called 3 times within 60 seconds
 - Warning event: `{"type": "doom_loop_warning", "tool": "...", "args": {...}, "choices": ["once", "always", "reject"]}`
-- User response: `{"type": "doom_loop_response", "choice": "once"|"always"|"reject"}`
 - Whitelist: `.mini_forensics_doom_whitelist.json` (5 min TTL, persisted)
 - Timeout: 30 seconds (auto-chooses "once")
+
+### Doom Loop UI Dialogs
+- **TUI**: `DoomLoopModal` — Textual ModalScreen with Once/Always/Reject buttons
+- **GUI**: `DoomLoopDialog` — NiceGUI ui.dialog with Once/Always/Reject buttons
+- User clicks button → `trigger_doom_loop_choice(choice)` notifies DoomLoopWaiter
+- Callback mechanism: `set_doom_loop_global_callback()` + `trigger_doom_loop_choice()`
 
 ## GUI / TUI Parameters
 - Engine selector: Select dropdown (TUI), radio buttons (GUI) — MLX / llama.cpp
