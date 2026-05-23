@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from nicegui import ui
 
-from .loop import run_loop, set_doom_loop_global_callback, trigger_doom_loop_choice
+from .loop import run_loop, trigger_doom_loop_choice
 from .models import (
     DEFAULT_AGENT_WORKSPACE,
     DEFAULT_MODEL_ROOT,
@@ -86,10 +86,6 @@ def _show_doom_loop_warning(tool: str, args: dict) -> None:
             ui.button("Reject", on_click=lambda: _select("reject")).classes("negative")
 
     dialog.open()
-
-
-def _notify_doom_loop_choice(choice: str) -> None:
-    trigger_doom_loop_choice(choice)
 
 
 def _parse_optional_int(raw: str) -> int | None:
@@ -834,6 +830,5 @@ def index_page() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    set_doom_loop_global_callback(_notify_doom_loop_choice)
     ui.run(title="MiniForensicsAgent", port=8090, reload=False)
     return 0

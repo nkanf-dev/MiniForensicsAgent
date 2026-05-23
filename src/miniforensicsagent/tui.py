@@ -17,7 +17,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, ListItem, ListView, Select, Static
 from textual.worker import Worker
 
-from .loop import run_loop, set_doom_loop_global_callback, trigger_doom_loop_choice
+from .loop import run_loop, trigger_doom_loop_choice
 from .models import (
     DEFAULT_AGENT_WORKSPACE,
     DEFAULT_MODEL_ROOT,
@@ -333,7 +333,6 @@ class ForensicsTuiApp(App):
         self._refresh_right_panels()
         self._mount_status_card("system", "Ready.")
         self._mount_status_card("system", "Tip: focus a card and press c to copy text.")
-        set_doom_loop_global_callback(self._notify_doom_loop_choice)
 
     def _reload_models(self) -> None:
         root = Path(self.config.model_root).expanduser().resolve()

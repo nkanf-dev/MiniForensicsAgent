@@ -38,18 +38,12 @@ class ToolCallRecord:
 _doom_loop_whitelist: dict[tuple[str, frozenset], float] = {}
 _doom_loop_whitelist_lock = threading.Lock()
 _doom_loop_waiter: "DoomLoopWaiter | None" = None
-_doom_loop_global_callback: "Callable[[str], None] | None" = None
-
-
-def set_doom_loop_global_callback(cb: "Callable[[str], None] | None") -> None:
-    global _doom_loop_global_callback
-    _doom_loop_global_callback = cb
 
 
 def trigger_doom_loop_choice(choice: str) -> None:
-    global _doom_loop_global_callback
-    if _doom_loop_global_callback:
-        _doom_loop_global_callback(choice)
+    global _doom_loop_waiter
+    if _doom_loop_waiter is not None:
+        _doom_loop_waiter.notify(choice)
 
 
 class DoomLoopWaiter:
@@ -84,12 +78,19 @@ def _load_whitelist() -> None:
             data = json.loads(path.read_text())
             now = time.time()
             with _doom_loop_whitelist_lock:
-                _doom_loop_whitelist = {
-                    (k[0], frozenset(k[1])): v
-                    for k, v in data.items()
-                    if now - v < DOOM_LOOP_WHITELIST_DURATION_SECONDS
-                }
-        except (json.JSONDecodeError, ValueError):
+                if isinstance(data, list):
+                    _doom_loop_whitelist = {
+                        (entry["name"], frozenset(tuple(item) for item in entry["args_frozen"])): entry["timestamp"]
+                        for entry in data
+                        if now - entry["timestamp"] < DOOM_LOOP_WHITELIST_DURATION_SECONDS
+                    }
+                else:
+                    _doom_loop_whitelist = {
+                        (k[0], frozenset(k[1])): v
+                        for k, v in data.items()
+                        if now - v < DOOM_LOOP_WHITELIST_DURATION_SECONDS
+                    }
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError):
             with _doom_loop_whitelist_lock:
                 _doom_loop_whitelist = {}
     else:
@@ -100,7 +101,14 @@ def _load_whitelist() -> None:
 def _save_whitelist() -> None:
     path = Path(DOOM_LOOP_WHITELIST_FILE)
     with _doom_loop_whitelist_lock:
-        data = {list(k): v for k, v in _doom_loop_whitelist.items()}
+        data = [
+            {
+                "name": name,
+                "args_frozen": [list(item) for item in sorted(args_frozen)],
+                "timestamp": timestamp,
+            }
+            for (name, args_frozen), timestamp in _doom_loop_whitelist.items()
+        ]
     path.write_text(json.dumps(data), encoding='utf-8')
 
 
