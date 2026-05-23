@@ -79,7 +79,6 @@ def main() -> int:
             engine="llamacpp",
             llama_cpp_url=args.llama_cpp_url,
             llama_cpp_model=args.llama_cpp_model,
-            use_chat=args.use_chat,
         )
         selected_name = args.llama_cpp_model
         selected_path = Path(args.llama_cpp_model)

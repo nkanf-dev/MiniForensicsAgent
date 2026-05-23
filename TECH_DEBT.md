@@ -37,6 +37,8 @@
 | TD-07 | count_tokens re-joins chunks every 20 | loop.py | 低 | Incremental counting |
 | TD-08 | Bash AllowedCommands scattered | prompting.py | 低 | Centralize constant |
 | TD-09 | _cleanup_expired_entries modifies during iteration | loop.py | 低 | Collect keys first |
+| TD-10 | UI label "LLamaCpp" vs "LlamaCpp" spelling inconsistency | tui.py | 低 | Standardize capitalization |
+| TD-11 | Doom loop detection/whitelist persistence lacks unit tests | loop.py | 中 | Add unit tests for threshold detection, save/load roundtrip, and DoomLoopWaiter.notify/unblock |
 
 ---
 
@@ -113,3 +115,11 @@ def some_function() -> Result[GoodType, str]:
 **Location**: `loop.py:134-136`
 **Issue**: `del _doom_loop_whitelist[k]` while iterating
 **Status**: Fixed in 49bcdc8 (collect keys first)
+
+### TD-11: Missing doom loop unit tests
+**Location**: `tests/test_loop.py`, `loop.py`
+**Issue**: Doom loop detection, whitelist persistence, and DoomLoopWaiter are complex but untested
+**Fix**: Add unit tests:
+1. Threshold detection with same tool+args called 3 times
+2. Whitelist save/load roundtrip (JSON format)
+3. DoomLoopWaiter.notify() unblocks waiter (no timeout)

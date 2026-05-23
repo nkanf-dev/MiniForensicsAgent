@@ -89,7 +89,7 @@ def run_tool(
             raw_path = "."
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
-            if path.parts and len(path.parts[0]) == 2 and path.parts[0].isalpha():
+            if path.parts and len(path.parts[0]) == 2 and path.parts[0].endswith(":"):
                 path = path.resolve() if path.exists() else Path(path.drive) / path
             elif path.parts and path.parts[0] == workspace.name:
                 path = Path(*path.parts[1:]) if len(path.parts) > 1 else Path(".")

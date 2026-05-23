@@ -338,7 +338,6 @@ def load_local_model(
     *,
     llama_cpp_url: str | None = None,
     llama_cpp_model: str | None = None,
-    use_chat: bool = False,
 ):
     if engine == "llamacpp":
         return load_llama_cpp_model(

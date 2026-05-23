@@ -50,9 +50,8 @@ The `normalize_response()` function (loop.py:164) determines response type:
 
 ### Doom Loop UI Dialogs
 - **TUI**: `DoomLoopModal` — Textual ModalScreen with Once/Always/Reject buttons
-- **GUI**: `DoomLoopDialog` — NiceGUI ui.dialog with Once/Always/Reject buttons
-- User clicks button → `trigger_doom_loop_choice(choice)` notifies DoomLoopWaiter
-- Callback mechanism: `set_doom_loop_global_callback()` + `trigger_doom_loop_choice()`
+- **GUI**: `_show_doom_loop_warning()` — NiceGUI dialog with Once/Always/Reject buttons
+- User clicks button → `_notify_doom_loop_choice(choice)` → `trigger_doom_loop_choice(choice)` → `DoomLoopWaiter.notify(choice)`
 
 ## GUI / TUI Parameters
 - Engine selector: Select dropdown (TUI), radio buttons (GUI) — MLX / llama.cpp
