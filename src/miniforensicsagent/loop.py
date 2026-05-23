@@ -810,17 +810,20 @@ def run_loop(
             continue
 
         if response["type"] == "final":
-            previous_observations = transcript[-1].get("observations", []) if transcript else []
-            if any(is_blocking_failure_for_final(observation) for observation in previous_observations):
-                turn["observations"] = [{"ok": False, "error": "Cannot finish immediately after a blocking tool failure."}]
-                if event_callback is not None:
-                    event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": turn["observations"][-1]})
-                if stream_output:
-                    emit_observation_rendered(iteration, response, turn["observations"][-1])
-                transcript.append(turn)
-                if compress_observations and len(transcript) >= 2:
-                    compress_turn(transcript[-2])
-                continue
+            previous_turn = transcript[-1] if transcript else {}
+            previous_decision = previous_turn.get("decision", {})
+            if previous_decision.get("type") == "tool":
+                previous_observations = previous_turn.get("observations", [])
+                if any(is_blocking_failure_for_final(observation) for observation in previous_observations):
+                    turn["observations"] = [{"ok": False, "error": "Cannot finish immediately after a blocking tool failure."}]
+                    if event_callback is not None:
+                        event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": turn["observations"][-1]})
+                    if stream_output:
+                        emit_observation_rendered(iteration, response, turn["observations"][-1])
+                    transcript.append(turn)
+                    if compress_observations and len(transcript) >= 2:
+                        compress_turn(transcript[-2])
+                    continue
             turn["observations"] = []
             turn["finish"] = response.get("finish", "unknown")
             if event_callback is not None:
