@@ -39,6 +39,8 @@ def _translate_bash_command(command: str) -> str:
         return command
     original = command
     command = command.strip()
+    if command in BASH_TRANSLATIONS:
+        return BASH_TRANSLATIONS[command]
     parts = shlex.split(command)
     if not parts:
         return original
@@ -229,7 +231,7 @@ def run_tool(
                     for item in root.rglob(base_pattern):
                         if item.is_file():
                             try:
-                                rel = item.relative_to(root)
+                                rel = item.resolve().relative_to(workspace)
                                 rel_str = "/".join(rel.parts)
                                 matches.append(rel_str)
                             except ValueError:
@@ -311,7 +313,7 @@ def run_tool(
                 for item in root.rglob("*"):
                     if not item.is_file():
                         continue
-                    rel_path = item.relative_to(root)
+                    rel_path = item.resolve().relative_to(workspace)
                     rel = "/".join(rel_path.parts)
                     name = item.name
                     if not any(fnmatch.fnmatch(name, g.replace("**/", "").replace("**", "*")) for g in glob_patterns):

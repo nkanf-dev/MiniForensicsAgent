@@ -339,15 +339,12 @@ def index_page() -> None:
     # ---------------------------------------------------------------
 
     def drain_ui_queue() -> None:
-        import sys
+        count = 0
         try:
-            count = 0
             while True:
                 fn = state.ui_queue.get_nowait()
                 count += 1
                 fn()
-            if count > 0:
-                print(f"[DEBUG drain_ui_queue] processed {count} items", file=sys.stderr, flush=True)
         except _queue.Empty:
             pass
 
@@ -358,12 +355,9 @@ def index_page() -> None:
     def on_event(event: dict[str, Any]) -> None:
         kind = str(event.get("type", ""))
         iteration = event.get("iteration", "?")
-        import sys
-        print(f"[DEBUG on_event] kind={kind} iteration={iteration}", file=sys.stderr, flush=True)
 
         if kind == "stream_chunk":
             chunk = str(event.get("chunk", ""))
-            print(f"[DEBUG stream_chunk] chunk={repr(chunk[:50])}", file=sys.stderr, flush=True)
             if chunk:
                 state.stream_buffer += chunk
             return
@@ -402,13 +396,10 @@ def index_page() -> None:
             return
 
         if kind == "model_output":
-            import sys
             text = str(event.get("text", ""))
-            print(f"[DEBUG model_output] text length={len(text)} text={repr(text[:100])}", file=sys.stderr, flush=True)
             if text:
                 state.stream_buffer += text
             buf = state.stream_buffer.strip()
-            print(f"[DEBUG model_output] stream_buffer len={len(state.stream_buffer)} buf len={len(buf)}", file=sys.stderr, flush=True)
             if buf:
                 preview = buf[-800:]
                 state.ui_queue.put(
@@ -474,8 +465,6 @@ def index_page() -> None:
 
     def _q(kind: str, text: str) -> None:
         """Enqueue an add_chat_card call (thread-safe)."""
-        import sys
-        print(f"[DEBUG _q] kind={kind} text={repr(text[:100])}", file=sys.stderr, flush=True)
         state.ui_queue.put(lambda k=kind, t=text: add_chat_card(k, t))
 
     def do_run() -> None:

@@ -255,7 +255,11 @@ Do NOT output plain text. Do NOT output explanations before <final>."""
 
             for obs in observations:
                 if obs.get("ok"):
-                    content = obs.get("content", "")
+                    if obs.get("content"):
+                        content = obs["content"]
+                    else:
+                        safe_obs = {k: v for k, v in obs.items() if k not in ("hint",)}
+                        content = json.dumps(safe_obs, ensure_ascii=False)
                     if len(content) > 2000:
                         content = content[:2000] + f"\n... [truncated {len(content)-2000} chars]"
                     messages.append({"role": "tool", "content": content})
