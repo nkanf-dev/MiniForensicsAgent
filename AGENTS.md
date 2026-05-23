@@ -99,3 +99,41 @@ The `normalize_response()` function (loop.py:164) determines response type:
 - Stored in `.mini_forensics_conversations.json` (in working directory)
 - Auto-saved on every run completion
 - Auto-loaded on GUI/TUI startup
+
+## Technical Debt
+
+### Resolved (commit 49bcdc8)
+| ID | 问题 | 修复 |
+|----|------|------|
+| P0-1 | GUI SessionState per-request instantiation | Module-level singleton |
+| P0-2 | TUI last conversation delete warning | Already had return |
+| P0-3 | Windows path separator `\`, `/` mixed | `rel.as_posix()` |
+| P0-4 | Pipe operator `\|` not translated on Windows | Recursive translation |
+| P1-5/6 | Symlink path traversal | Resolve before comparison |
+| P1-7 | Windows drive letter `C:` handling | Added detection |
+| P1-9 | ValueError raised in extract_first_json_object | Return None instead |
+| P1-10 | discover_models rglob(*) performance | rglob(config.json) |
+| P1-11 | Whitelist race conditions | threading.Lock added |
+
+### Outstanding
+
+#### P1 - High Priority
+| ID | 问题 | 文件 | 建议 |
+|----|------|------|------|
+| TD-01 | run_tool if/elif chain (~150 lines) | tools.py | Dict dispatch pattern |
+| TD-02 | Missing type hints (Any泛滥) | Multiple | Add incrementally |
+| TD-03 | Inconsistent error handling | Multiple | Unify Result type |
+
+#### P2 - Medium Priority
+| ID | 问题 | 文件 | 建议 |
+|----|------|------|------|
+| TD-04 | Config classes scattered | gui.py, cli.py | Extract Config abstraction |
+| TD-05 | Skills tight coupling | skills.py | Separate responsibilities |
+| TD-06 | Model loading engine coupling | models.py | Strategy pattern |
+
+#### P3 - Low Priority
+| ID | 问题 | 文件 | 建议 |
+|----|------|------|------|
+| TD-07 | count_tokens re-joins chunks | loop.py | Incremental counting |
+| TD-08 | Bash AllowedCommands scattered | prompting.py | Centralize constant |
+| TD-09 | _cleanup_expired_entries modifies during iteration | loop.py | Collect keys first |
