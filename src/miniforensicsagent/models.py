@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import requests
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 DEFAULT_MODEL_ROOT = Path.home() / ".lmstudio" / "models"
@@ -28,14 +29,15 @@ def discover_models(root: Path) -> list[LocalModel]:
     if not root.exists():
         return []
     models: list[LocalModel] = []
-    for candidate in sorted(root.rglob("*")):
+    for config_file in root.rglob("config.json"):
+        candidate = config_file.parent
         if looks_like_mlx_model(candidate):
             try:
                 display = str(candidate.relative_to(root))
             except ValueError:
                 display = candidate.name
             models.append(LocalModel(name=display, path=candidate))
-    return models
+    return sorted(models, key=lambda m: m.name)
 
 
 def format_models(models: Iterable[LocalModel]) -> str:
@@ -282,6 +284,65 @@ def prepare_effgen_imports():
     return GenerationConfig, load_model
 
 
-def load_local_model(model_path: Path):
+def load_llama_cpp_model(
+    base_url: str = "http://localhost:8080/v1",
+    model: str = "qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf",
+) -> tuple[Any, type]:
+    from .llamacpp import LlamaCPPHTTPClient
+
+    client = LlamaCPPHTTPClient(base_url, model)
+    return client, _make_dummy_generation_config()
+
+
+def _make_dummy_generation_config() -> type:
+    class DummyGenerationConfig:
+        def __init__(
+            self,
+            temperature: float = 0.3,
+            max_tokens: int = 768,
+            top_p: float = 0.9,
+            stop_sequences: list[str] | None = None,
+            **kwargs: Any,
+        ) -> None:
+            self.temperature = temperature
+            self.max_tokens = max_tokens
+            self.top_p = top_p
+            self.stop_sequences = stop_sequences
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+        def __call__(self, **kwargs: Any) -> DummyGenerationConfig:
+            return DummyGenerationConfig(**kwargs)
+
+    return DummyGenerationConfig
+
+
+def discover_llama_cpp_models(base_url: str) -> list[LocalModel]:
+    try:
+        resp = requests.get(f"{base_url.rstrip('/')}/models", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        models: list[LocalModel] = []
+        for obj in data.get("data", []):
+            mid = obj.get("id", "")
+            if mid:
+                models.append(LocalModel(name=mid, path=Path(mid)))
+        return models
+    except Exception:
+        return []
+
+
+def load_local_model(
+    model_path: Path | None,
+    engine: str = "mlx",
+    *,
+    llama_cpp_url: str | None = None,
+    llama_cpp_model: str | None = None,
+):
+    if engine == "llamacpp":
+        return load_llama_cpp_model(
+            base_url=llama_cpp_url or "http://localhost:8080/v1",
+            model=llama_cpp_model or "qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf",
+        )
     GenerationConfig, load_model = prepare_effgen_imports()
     return load_model(str(model_path), engine="mlx"), GenerationConfig

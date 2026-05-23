@@ -9,6 +9,7 @@ dependencies = [
     "nicegui>=2.0",
     "rich",
     "textual",
+    "requests",
 ]
 
 [project.optional-dependencies]

@@ -4,12 +4,56 @@ import fnmatch
 import json
 import re
 import shlex
+import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from .skills import DEFAULT_SKILL_READ_LIMIT, SkillCatalog, activate_skill, read_skill_resource
+
+IS_WINDOWS = sys.platform == "win32"
+_has_rg_cache: bool | None = None
+
+
+def _has_rg() -> bool:
+    global _has_rg_cache
+    if _has_rg_cache is None:
+        _has_rg_cache = shutil.which("rg") is not None
+    return _has_rg_cache
+
+
+BASH_TRANSLATIONS: dict[str, str] = {
+    "pwd": "cd",
+    "ls": "dir /b" if IS_WINDOWS else "ls",
+    "ls -la": "dir /a" if IS_WINDOWS else "ls -la",
+    "cat": "type",
+    "find": "dir /s /b" if IS_WINDOWS else "find",
+    "clear": "cls" if IS_WINDOWS else "clear",
+}
+
+
+def _translate_bash_command(command: str) -> str:
+    if not IS_WINDOWS:
+        return command
+    original = command
+    command = command.strip()
+    if command in BASH_TRANSLATIONS:
+        return BASH_TRANSLATIONS[command]
+    if "|" in command:
+        parts = command.split("|")
+        translated_parts = [_translate_bash_command(p.strip()) for p in parts]
+        return " | ".join(translated_parts)
+    parts = shlex.split(command)
+    if not parts:
+        return original
+    base = parts[0].lower()
+    translated = BASH_TRANSLATIONS.get(base)
+    if translated:
+        parts[0] = translated
+        return " ".join(parts)
+    return original
 
 
 DEFAULT_READ_LIMIT = 80
@@ -45,10 +89,15 @@ def run_tool(
             raw_path = "."
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
-            if path.parts and path.parts[0] == workspace.name:
+            if path.parts and len(path.parts[0]) == 2 and path.parts[0].endswith(":"):
+                path = path.resolve() if path.exists() else Path(path.drive) / path
+            elif path.parts and path.parts[0] == workspace.name:
                 path = Path(*path.parts[1:]) if len(path.parts) > 1 else Path(".")
             path = workspace / path
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            raise ValueError(f"Cannot resolve path: {path}")
         if resolved != workspace and workspace not in resolved.parents:
             raise ValueError(f"Path outside workspace: {resolved}")
         return resolved
@@ -170,18 +219,33 @@ def run_tool(
             if not root.exists():
                 return {"ok": False, "error": f"Path does not exist: {root}", "cwd_hint": str((root.parent if root.parent.exists() else workspace).resolve()), "entries": nearby_listing(root)}
             patterns = [item.replace(".*", "*") for item in expand_brace_pattern(str(args["pattern"]))]
-            matches: list[str] = []
-            for pattern in patterns:
-                completed = subprocess.run(["rg", "--files", str(root), "-g", pattern], cwd=workspace, capture_output=True, text=True, timeout=180, check=False)
-                for line in completed.stdout.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        matches.append(str(Path(line).resolve().relative_to(workspace)))
-                    except Exception:
-                        continue
-            matches = sorted(dict.fromkeys(matches))
+
+            if _has_rg():
+                matches: list[str] = []
+                for pattern in patterns:
+                    completed = subprocess.run(["rg", "--files", str(root), "-g", pattern], cwd=workspace, capture_output=True, text=True, timeout=180, check=False)
+                    for line in completed.stdout.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            matches.append(str(Path(line).resolve().relative_to(workspace)))
+                        except Exception:
+                            continue
+                matches = sorted(dict.fromkeys(matches))
+            else:
+                matches = []
+                for pattern in patterns:
+                    base_pattern = pattern.lstrip("/\\")
+                    for item in root.rglob(base_pattern):
+                        if item.is_file():
+                            try:
+                                rel = item.resolve().relative_to(workspace)
+                                rel_str = rel.as_posix()
+                                matches.append(rel_str)
+                            except ValueError:
+                                continue
+                matches = sorted(dict.fromkeys(matches))
             if not matches:
                 related = suggest_related_paths_for_glob(root, str(args["pattern"]))
                 hint = "No glob matches. Try a broader pattern, inspect nearby directories, or search a parent path first."
@@ -218,29 +282,62 @@ def run_tool(
                 return {"ok": False, "error": f"Path does not exist: {root}", "cwd_hint": str((root.parent if root.parent.exists() else workspace).resolve()), "entries": nearby_listing(root)}
             pattern = str(args["pattern"])
             glob_patterns = expand_brace_pattern(str(args.get("glob", "*")))
-            rg_cmd = ["rg", "-n", "-S", "--no-heading", pattern]
-            for glob_pattern in glob_patterns:
-                rg_cmd.extend(["-g", glob_pattern])
-            rg_cmd.append(str(root))
-            completed = subprocess.run(rg_cmd, cwd=workspace, capture_output=True, text=True, timeout=180, check=False)
+
+            def _parse_grep_result(rel_path: str, line_no: int, text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+                full = {"file": rel_path, "line": line_no, "text": text}
+                preview_text = trim_text_for_preview(text)
+                preview = {"file": rel_path, "line": line_no, "text": preview_text}
+                return full, preview
+
             matches: list[dict[str, Any]] = []
             full_matches: list[dict[str, Any]] = []
             trimmed_lines = 0
-            for line in completed.stdout.splitlines():
-                parts = line.split(":", 2)
-                if len(parts) != 3:
-                    continue
-                file_part, line_no, text = parts
+
+            if _has_rg():
+                rg_cmd = ["rg", "-n", "-S", "--no-heading", pattern]
+                for glob_pattern in glob_patterns:
+                    rg_cmd.extend(["-g", glob_pattern])
+                rg_cmd.append(str(root))
+                completed = subprocess.run(rg_cmd, cwd=workspace, capture_output=True, text=True, timeout=180, check=False)
+                for line in completed.stdout.splitlines():
+                    parts = line.split(":", 2)
+                    if len(parts) != 3:
+                        continue
+                    file_part, line_no, text = parts
+                    try:
+                        rel = str(Path(file_part).resolve().relative_to(workspace))
+                    except Exception:
+                        rel = file_part
+                    line_value = int(line_no) if line_no.isdigit() else 1
+                    full, preview = _parse_grep_result(rel, line_value, text)
+                    full_matches.append(full)
+                    if preview["text"] != text:
+                        trimmed_lines += 1
+                    matches.append(preview)
+            else:
                 try:
-                    rel = str(Path(file_part).resolve().relative_to(workspace))
-                except Exception:
-                    rel = file_part
-                line_value = int(line_no) if line_no.isdigit() else 1
-                full_matches.append({"file": rel, "line": line_value, "text": text})
-                preview_text = trim_text_for_preview(text)
-                if preview_text != text:
-                    trimmed_lines += 1
-                matches.append({"file": rel, "line": line_value, "text": preview_text})
+                    regex = re.compile(pattern, re.IGNORECASE)
+                except re.error:
+                    return {"ok": False, "error": f"Invalid regex pattern: {pattern}"}
+                for item in root.rglob("*"):
+                    if not item.is_file():
+                        continue
+                    rel_path = item.resolve().relative_to(workspace)
+                    rel = "/".join(rel_path.parts)
+                    name = item.name
+                    if not any(fnmatch.fnmatch(name, g.replace("**/", "").replace("**", "*")) for g in glob_patterns):
+                        continue
+                    try:
+                        content = item.read_text(encoding="utf-8", errors="replace")
+                        for i, line in enumerate(content.splitlines(), 1):
+                            if regex.search(line):
+                                full, preview = _parse_grep_result(rel, i, line)
+                                full_matches.append(full)
+                                if preview["text"] != line:
+                                    trimmed_lines += 1
+                                matches.append(preview)
+                    except Exception:
+                        continue
             if not matches:
                 related = suggest_related_files(root, pattern, glob_patterns)
                 hint = "No exact text match. Try a broader pattern, inspect related files, or search for nearby runtime symbols."
@@ -303,7 +400,7 @@ def run_tool(
 
         if tool == "Bash":
             command = str(args["command"]).strip()
-            _parts = shlex.split(command)
+            command = _translate_bash_command(command)
             completed = subprocess.run(command, cwd=workspace, shell=True, capture_output=True, text=True, timeout=180, check=False)
             output = completed.stdout.strip()
             if completed.stderr.strip():

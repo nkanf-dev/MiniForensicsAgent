@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,13 +13,171 @@ from .evidence import (
     has_promising_but_incomplete_candidate,
     update_evidence_cache,
 )
-from .prompting import build_prompt
+from .prompting import build_chat_messages, build_prompt
 from .render import HAS_RICH, Live, RICH_STDERR, build_status_renderable, count_tokens, emit_observation_rendered, start_prefill_indicator
 from .skills import SkillCatalog, render_active_skill_context, render_skill_catalog
 from .tools import run_tool
 
 
 TOOL_NAMES = {"Read", "Glob", "Grep", "Bash", "Write", "Edit", "ActivateSkill", "ReadSkillResource"}
+
+DOOM_LOOP_THRESHOLD = 3
+DOOM_LOOP_WINDOW_SECONDS = 60
+DOOM_LOOP_WHITELIST_DURATION_SECONDS = 300
+DOOM_LOOP_RESPONSE_TIMEOUT_SECONDS = 30
+DOOM_LOOP_WHITELIST_FILE = ".mini_forensics_doom_whitelist.json"
+
+
+@dataclass
+class ToolCallRecord:
+    name: str
+    args_frozen: frozenset
+    timestamp: float
+
+
+_doom_loop_whitelist: dict[tuple[str, frozenset], float] = {}
+_doom_loop_whitelist_lock = threading.Lock()
+_doom_loop_waiter: "DoomLoopWaiter | None" = None
+
+
+def trigger_doom_loop_choice(choice: str) -> None:
+    global _doom_loop_waiter
+    if _doom_loop_waiter is not None:
+        _doom_loop_waiter.notify(choice)
+
+
+class DoomLoopWaiter:
+    def __init__(self):
+        self._event: threading.Event | None = None
+        self._choice: str | None = None
+
+    def wait(self, timeout: int = DOOM_LOOP_RESPONSE_TIMEOUT_SECONDS) -> str:
+        if self._event is None:
+            return "once"
+        if self._event.wait(timeout):
+            return self._choice or "once"
+        return "once"
+
+    def notify(self, choice: str) -> None:
+        self._choice = choice
+        if self._event:
+            self._event.set()
+
+
+def _build_args_frozen(args: dict) -> frozenset:
+    if not isinstance(args, dict):
+        return frozenset()
+    return frozenset((k, str(v)) for k, v in sorted(args.items()))
+
+
+def _load_whitelist() -> None:
+    global _doom_loop_whitelist
+    path = Path(DOOM_LOOP_WHITELIST_FILE)
+    if path.exists():
+        try:
+            data = json.loads(path.read_text())
+            now = time.time()
+            with _doom_loop_whitelist_lock:
+                if isinstance(data, list):
+                    _doom_loop_whitelist = {
+                        (entry["name"], frozenset(tuple(item) for item in entry["args_frozen"])): entry["timestamp"]
+                        for entry in data
+                        if now - entry["timestamp"] < DOOM_LOOP_WHITELIST_DURATION_SECONDS
+                    }
+                else:
+                    _doom_loop_whitelist = {
+                        (k[0], frozenset(k[1])): v
+                        for k, v in data.items()
+                        if now - v < DOOM_LOOP_WHITELIST_DURATION_SECONDS
+                    }
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+            with _doom_loop_whitelist_lock:
+                _doom_loop_whitelist = {}
+    else:
+        with _doom_loop_whitelist_lock:
+            _doom_loop_whitelist = {}
+
+
+def _save_whitelist() -> None:
+    path = Path(DOOM_LOOP_WHITELIST_FILE)
+    with _doom_loop_whitelist_lock:
+        data = [
+            {
+                "name": name,
+                "args_frozen": [list(item) for item in sorted(args_frozen)],
+                "timestamp": timestamp,
+            }
+            for (name, args_frozen), timestamp in _doom_loop_whitelist.items()
+        ]
+    path.write_text(json.dumps(data), encoding='utf-8')
+
+
+def _is_whitelisted(name: str, args: dict) -> bool:
+    key = (name, _build_args_frozen(args))
+    with _doom_loop_whitelist_lock:
+        if key not in _doom_loop_whitelist:
+            return False
+        if time.time() - _doom_loop_whitelist[key] > DOOM_LOOP_WHITELIST_DURATION_SECONDS:
+            del _doom_loop_whitelist[key]
+            return False
+        return True
+
+
+def _add_to_whitelist(name: str, args: dict) -> None:
+    key = (name, _build_args_frozen(args))
+    with _doom_loop_whitelist_lock:
+        _doom_loop_whitelist[key] = time.time()
+    _save_whitelist()
+
+
+def _check_doom_loop(name: str, args: dict, recent_calls: list[ToolCallRecord]) -> bool:
+    if _is_whitelisted(name, args):
+        return False
+    if len(recent_calls) < DOOM_LOOP_THRESHOLD:
+        return False
+    args_key = _build_args_frozen(args)
+    recent_same = [
+        r for r in recent_calls[-DOOM_LOOP_THRESHOLD:]
+        if r.name == name and r.args_frozen == args_key
+    ]
+    return len(recent_same) >= DOOM_LOOP_THRESHOLD
+
+
+def _cleanup_expired_entries(recent_calls: list[ToolCallRecord]) -> list[ToolCallRecord]:
+    now = time.time()
+    cutoff = now - DOOM_LOOP_WINDOW_SECONDS
+    with _doom_loop_whitelist_lock:
+        expired = [k for k, v in _doom_loop_whitelist.items() if now - v > DOOM_LOOP_WHITELIST_DURATION_SECONDS]
+        for k in expired:
+            del _doom_loop_whitelist[k]
+    if expired:
+        _save_whitelist()
+    return [r for r in recent_calls if r.timestamp > cutoff]
+
+
+def _wait_doom_loop_response() -> str:
+    global _doom_loop_waiter
+    if _doom_loop_waiter is None:
+        return "once"
+    choice = _doom_loop_waiter.wait(DOOM_LOOP_RESPONSE_TIMEOUT_SECONDS)
+    _doom_loop_waiter = None
+    return choice
+
+
+def _trigger_doom_loop_wait(tool: str, args: dict, iteration: int, event_callback: Callable | None) -> str:
+    global _doom_loop_waiter
+    _doom_loop_waiter = DoomLoopWaiter()
+    _doom_loop_waiter._event = threading.Event()
+    if event_callback:
+        event_callback({
+            "type": "doom_loop_warning",
+            "tool": tool,
+            "args": args,
+            "iteration": iteration,
+            "choices": ["once", "always", "reject"],
+            "timeout": DOOM_LOOP_RESPONSE_TIMEOUT_SECONDS,
+        })
+    return _wait_doom_loop_response()
 
 
 @dataclass
@@ -126,7 +285,7 @@ def extract_tagged_json(text: str, tag: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def extract_first_json_object(text: str) -> dict[str, Any]:
+def extract_first_json_object(text: str) -> dict[str, Any] | None:
     tagged_tool = extract_tagged_json(text, "tool_call")
     if tagged_tool:
         return tagged_tool
@@ -145,7 +304,7 @@ def extract_first_json_object(text: str) -> dict[str, Any]:
             continue
         if isinstance(parsed, dict):
             return parsed
-    raise ValueError(f"No JSON object found in model output: {text[:300]}")
+    return None
 
 
 def extract_all_tool_calls(text: str) -> list[dict[str, Any]]:
@@ -161,19 +320,47 @@ def extract_all_tool_calls(text: str) -> list[dict[str, Any]]:
     return calls
 
 
+def _extract_text_or_answer(payload: dict[str, Any]) -> str:
+    if "answer" in payload:
+        return str(payload["answer"])
+    text = payload.get("text")
+    if text and str(text).strip():
+        return str(text)
+    content = payload.get("content")
+    if content and str(content).strip():
+        return str(content)
+    parts = payload.get("parts", [])
+    if parts:
+        texts = []
+        for p in parts:
+            if isinstance(p, dict):
+                if p.get("type") == "text" and p.get("text"):
+                    texts.append(p["text"])
+                elif p.get("type") == "content" and isinstance(p.get("content"), list):
+                    for block in p["content"]:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            texts.append(block.get("text", ""))
+        if texts:
+            return " ".join(t for t in texts if t)
+    return "done"
+
+
 def normalize_response(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("type") == "plan" or {"goal", "steps", "done_when"} <= set(payload.keys()):
         return {"type": "plan", "plan": parse_plan_payload(payload)}
     if payload.get("type") == "plan_update":
         return {"type": "plan_update", "plan": parse_plan_payload(payload)}
     if payload.get("type") == "rubric" or {"strong_evidence", "weak_evidence", "finish_when"} <= set(payload.keys()):
-        # Backward compatibility: map rubric -> plan.
         goal = str(payload.get("finish_when", "finish with trusted evidence"))
         steps = [f"collect strong evidence: {item}" for item in payload.get("strong_evidence", [])] or default_plan_state()["steps"]
         mapped = {"goal": goal, "steps": steps, "done_when": goal}
         return {"type": "plan", "plan": parse_plan_payload(mapped)}
     if payload.get("type") == "final" or payload.get("action") == "final":
-        return {"type": "final", "answer": str(payload.get("answer", payload.get("summary", "done")))}
+        return {"type": "final", "finish": "explicit", "answer": _extract_text_or_answer(payload)}
+    finish = payload.get("finish_reason") or payload.get("finish")
+    has_tool_calls = bool(payload.get("tool_calls"))
+    if finish == "stop" and not has_tool_calls:
+        return {"type": "final", "finish": "implicit", "answer": _extract_text_or_answer(payload)}
     name = payload.get("name") or payload.get("tool") or payload.get("action")
     arguments = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else payload.get("args")
     if not isinstance(arguments, dict):
@@ -280,6 +467,7 @@ def run_loop(
     transcript_window: int | None = None,
     multi_tool: bool = False,
     skill_catalog: SkillCatalog | None = None,
+    use_chat: bool = False,
 ) -> LoopResult:
     transcript: list[dict[str, Any]] = []
     tool_calls = 0
@@ -290,6 +478,9 @@ def run_loop(
     running_tool_stats: dict[str, Any] = {"counts": {}, "failures": 0}
     active_skills: dict[str, dict[str, Any]] = {}
     available_skills_block = render_skill_catalog(skill_catalog) if skill_catalog is not None else ""
+    recent_tool_calls: list[ToolCallRecord] = []
+
+    _load_whitelist()
 
     for iteration in range(1, max_iterations + 1):
         if should_stop is not None and should_stop():
@@ -319,20 +510,34 @@ def run_loop(
             if hints:
                 reflection_hint = "\nReflection trigger:\n- " + "\n- ".join(hints) + "\n"
 
-        prompt = build_prompt(
-            task,
-            transcript,
-            workspace,
-            current_plan=plan_state or default_plan_state(),
-            remaining_iterations=max_iterations - iteration + 1,
-            reflection_hint=reflection_hint,
-            window=transcript_window,
-            multi_tool=multi_tool,
-            available_skills=available_skills_block,
-            active_skill_context=render_active_skill_context(active_skills),
-        )
         tokenizer = getattr(model, "tokenizer", None)
-        prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
+        if use_chat:
+            messages = build_chat_messages(
+                task,
+                transcript,
+                workspace,
+                current_plan=plan_state or default_plan_state(),
+                remaining_iterations=max_iterations - iteration + 1,
+                reflection_hint=reflection_hint,
+                multi_tool=multi_tool,
+                available_skills=available_skills_block,
+                active_skill_context=render_active_skill_context(active_skills),
+            )
+            prompt_tokens = None
+        else:
+            prompt = build_prompt(
+                task,
+                transcript,
+                workspace,
+                current_plan=plan_state or default_plan_state(),
+                remaining_iterations=max_iterations - iteration + 1,
+                reflection_hint=reflection_hint,
+                window=transcript_window,
+                multi_tool=multi_tool,
+                available_skills=available_skills_block,
+                active_skill_context=render_active_skill_context(active_skills),
+            )
+            prompt_tokens = count_tokens(tokenizer, prompt) if tokenizer is not None else None
         config = generation_config(temperature=temperature, max_tokens=max_tokens, top_p=0.9)
         # Fix #4: stop decoding at closing tags to avoid post-JSON prose.
         try:
@@ -355,7 +560,8 @@ def run_loop(
 
             if enable_terminal_stream and HAS_RICH and RICH_STDERR is not None and Live is not None:
                 with Live(build_status_renderable(iteration, phase="prefill", prompt_tokens=prompt_tokens, first_token_latency=None, generated_tokens=0, elapsed=0.0, tps=0.0, raw_preview=""), console=RICH_STDERR, refresh_per_second=8, transient=False) as live:
-                    for chunk in model.generate_stream(prompt, config=config):
+                    stream_generator = model.generate_stream_chat(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
+                    for chunk in stream_generator:
                         if should_stop is not None and should_stop():
                             return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
                         text = str(chunk)
@@ -384,7 +590,8 @@ def run_loop(
                 last_decode_report = 0.0
                 if enable_terminal_stream:
                     prefill_stop, prefill_thread, _ = start_prefill_indicator(iteration, prompt_tokens)
-                for chunk in model.generate_stream(prompt, config=config):
+                stream_generator = model.generate_stream_chat(messages, config=config) if use_chat else model.generate_stream(prompt, config=config)
+                for chunk in stream_generator:
                     if should_stop is not None and should_stop():
                         return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
                     text = str(chunk)
@@ -443,11 +650,21 @@ def run_loop(
                     generated_token_count = count_tokens(tokenizer, "".join(chunks)) or generated_token_count
             raw = "".join(chunks).strip()
         else:
-            raw = getattr(model.generate(prompt, config=config), "text", "").strip()
+            result = model.generate_chat(messages, config=config) if use_chat else model.generate(prompt, config=config)
+            if isinstance(result, dict):
+                raw = str(result.get("text", "")).strip()
+            else:
+                raw = str(getattr(result, "text", "")).strip()
             if event_callback is not None:
                 event_callback({"type": "model_output", "iteration": iteration, "text": raw})
 
         generated_tokens = count_tokens(tokenizer, raw) if tokenizer is not None else None
+        if hasattr(model, "last_usage") and model.last_usage:
+            usage = model.last_usage
+            if usage.get("prompt_tokens"):
+                prompt_tokens = usage["prompt_tokens"]
+            if usage.get("completion_tokens"):
+                generated_tokens = usage["completion_tokens"]
         turn: dict[str, Any] = {
             "iteration": iteration,
             "raw": raw,
@@ -528,7 +745,15 @@ def run_loop(
 
         # --- Single-tool / plan / final path ---
         try:
-            response = normalize_response(extract_first_json_object(raw))
+            response = extract_first_json_object(raw)
+            if response is None:
+                turn["observations"] = [{"ok": False, "error": "Output was not a valid tool_call/final JSON block."}]
+                transcript.append(turn)
+                _update_tool_stats(running_tool_stats, turn)
+                if compress_observations and len(transcript) >= 2:
+                    compress_turn(transcript[-2])
+                continue
+            response = normalize_response(response)
         except Exception:
             turn["observations"] = [{"ok": False, "error": "Output was not a valid tool_call/final JSON block."}]
             transcript.append(turn)
@@ -593,25 +818,54 @@ def run_loop(
             continue
 
         if response["type"] == "final":
-            previous_observations = transcript[-1].get("observations", []) if transcript else []
-            if any(is_blocking_failure_for_final(observation) for observation in previous_observations):
-                turn["observations"] = [{"ok": False, "error": "Cannot finish immediately after a blocking tool failure."}]
-                if event_callback is not None:
-                    event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": turn["observations"][-1]})
-                if stream_output:
-                    emit_observation_rendered(iteration, response, turn["observations"][-1])
-                transcript.append(turn)
-                if compress_observations and len(transcript) >= 2:
-                    compress_turn(transcript[-2])
-                continue
+            previous_turn = transcript[-1] if transcript else {}
+            previous_decision = previous_turn.get("decision", {})
+            if previous_decision.get("type") == "tool":
+                previous_observations = previous_turn.get("observations", [])
+                if any(is_blocking_failure_for_final(observation) for observation in previous_observations):
+                    turn["observations"] = [{"ok": False, "error": "Cannot finish immediately after a blocking tool failure."}]
+                    if event_callback is not None:
+                        event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": turn["observations"][-1]})
+                    if stream_output:
+                        emit_observation_rendered(iteration, response, turn["observations"][-1])
+                    transcript.append(turn)
+                    if compress_observations and len(transcript) >= 2:
+                        compress_turn(transcript[-2])
+                    continue
             turn["observations"] = []
+            turn["finish"] = response.get("finish", "unknown")
             if event_callback is not None:
-                event_callback({"type": "final", "iteration": iteration, "answer": response["answer"]})
+                event_callback({"type": "final", "iteration": iteration, "answer": response["answer"], "finish": turn["finish"]})
             transcript.append(turn)
             return LoopResult(True, response["answer"], iteration, tool_calls, transcript)
 
         if should_stop is not None and should_stop():
             return LoopResult(False, "cancelled", iteration, tool_calls, transcript)
+
+        name = response.get("name", "")
+        args = response.get("arguments", {})
+        if _check_doom_loop(name, args, recent_tool_calls):
+            choice = _trigger_doom_loop_wait(name, args, iteration, event_callback)
+            if choice == "reject":
+                observation = {"ok": True, "output": "", "skipped": True}
+                turn["observations"] = [observation]
+                if event_callback is not None:
+                    event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": observation})
+                transcript.append(turn)
+                if compress_observations and len(transcript) >= 2:
+                    compress_turn(transcript[-2])
+                continue
+            if choice == "always":
+                _add_to_whitelist(name, args)
+                observation = {"ok": True, "output": "", "skipped": True}
+                turn["observations"] = [observation]
+                if event_callback is not None:
+                    event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": observation})
+                transcript.append(turn)
+                if compress_observations and len(transcript) >= 2:
+                    compress_turn(transcript[-2])
+                continue
+
         observation = run_tool(
             response,
             workspace,
@@ -619,6 +873,8 @@ def run_loop(
             active_skill_names=set(active_skills),
         )
         tool_calls += 1
+        recent_tool_calls.append(ToolCallRecord(name, _build_args_frozen(args), time.time()))
+        recent_tool_calls = _cleanup_expired_entries(recent_tool_calls)
         update_active_skills(active_skills, response, observation)
         turn["observations"] = [observation]
         added_evidence = update_evidence_cache(evidence_cache, response, observation)

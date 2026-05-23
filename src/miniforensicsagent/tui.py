@@ -14,10 +14,10 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, ListItem, ListView, Static
+from textual.widgets import Button, Checkbox, Input, Label, ListItem, ListView, Select, Static
 from textual.worker import Worker
 
-from .loop import run_loop
+from .loop import run_loop, trigger_doom_loop_choice
 from .models import (
     DEFAULT_AGENT_WORKSPACE,
     DEFAULT_MODEL_ROOT,
@@ -32,6 +32,9 @@ from .models import (
 class TuiConfig:
     model: str = "LocoOperator"
     model_root: str = str(DEFAULT_MODEL_ROOT)
+    engine: str = "mlx"
+    llama_cpp_url: str = "http://localhost:8080/v1"
+    llama_cpp_model: str = "qwen3.5-9b-instruct.Q4_K_M_deepseek4.gguf"
     workspace: str = str(DEFAULT_AGENT_WORKSPACE)
     max_iterations: int = 12
     max_tokens: int = 768
@@ -43,6 +46,7 @@ class TuiConfig:
     turboquant: bool = False
     tq_r_bits: int = 4
     tq_theta_bits: int = 4
+    use_chat: bool = False
     # Experimental
     compress_observations: bool = False
     transcript_window: int | None = None
@@ -118,6 +122,15 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 yield self._row("Model", Input(self.config.model, id="p_model"))
                 yield self._row("Model Root", Input(self.config.model_root, id="p_model_root"))
                 yield self._row("Workspace", Input(self.config.workspace, id="p_workspace"))
+                engine_select = Select(
+                    id="p_engine",
+                    options=[("MLX", "mlx"), ("llama.cpp", "llamacpp")],
+                    value=self.config.engine,
+                )
+                yield self._row("Engine", engine_select)
+                yield Static("=== llama.cpp Parameters ===", id="llama-params-label")
+                yield self._row("LLamaCpp URL", Input(self.config.llama_cpp_url, id="p_llama_cpp_url"))
+                yield self._row("LLamaCpp Model", Input(self.config.llama_cpp_model, id="p_llama_cpp_model"))
                 yield self._row("Max Iterations", Input(str(self.config.max_iterations), id="p_max_iterations"))
                 yield self._row("Max Tokens", Input(str(self.config.max_tokens), id="p_max_tokens"))
                 yield self._row("Temperature", Input(str(self.config.temperature), id="p_temperature"))
@@ -128,6 +141,7 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 yield self._row("TurboQuant", Checkbox(label="Enable", value=self.config.turboquant, id="p_turboquant"))
                 yield self._row("TQ r_bits", Input(str(self.config.tq_r_bits), id="p_tq_r_bits"))
                 yield self._row("TQ theta_bits", Input(str(self.config.tq_theta_bits), id="p_tq_theta_bits"))
+                yield self._row("Use Chat", Checkbox(label="Enable", value=self.config.use_chat, id="p_use_chat"))
                 yield self._row("[exp] Compress Obs", Checkbox(label="Enable", value=self.config.compress_observations, id="p_compress_obs"))
                 yield self._row("[exp] Transcript Window", Input("" if self.config.transcript_window is None else str(self.config.transcript_window), id="p_transcript_window"))
                 yield self._row("[exp] Multi-Tool", Checkbox(label="Enable", value=self.config.multi_tool, id="p_multi_tool"))
@@ -149,6 +163,9 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 "model": self.query_one("#p_model", Input).value.strip(),
                 "model_root": self.query_one("#p_model_root", Input).value.strip(),
                 "workspace": self.query_one("#p_workspace", Input).value.strip(),
+                "engine": self.query_one("#p_engine", Select).value,
+                "llama_cpp_url": self.query_one("#p_llama_cpp_url", Input).value.strip(),
+                "llama_cpp_model": self.query_one("#p_llama_cpp_model", Input).value.strip(),
                 "max_iterations": int(self.query_one("#p_max_iterations", Input).value.strip()),
                 "max_tokens": int(self.query_one("#p_max_tokens", Input).value.strip()),
                 "temperature": float(self.query_one("#p_temperature", Input).value.strip()),
@@ -159,6 +176,7 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
                 "turboquant": self.query_one("#p_turboquant", Checkbox).value,
                 "tq_r_bits": int(self.query_one("#p_tq_r_bits", Input).value.strip()),
                 "tq_theta_bits": int(self.query_one("#p_tq_theta_bits", Input).value.strip()),
+                "use_chat": True if self.query_one("#p_engine", Select).value == "llamacpp" else self.query_one("#p_use_chat", Checkbox).value,
                 "compress_observations": self.query_one("#p_compress_obs", Checkbox).value,
                 "transcript_window": _parse_optional_int(self.query_one("#p_transcript_window", Input).value),
                 "multi_tool": self.query_one("#p_multi_tool", Checkbox).value,
@@ -167,6 +185,28 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
             self.notify(f"Invalid params: {exc}", severity="error")
             return
         self.dismiss(payload)
+
+
+class DoomLoopModal(ModalScreen[str]):
+    def __init__(self, tool: str, args: dict):
+        super().__init__()
+        self.tool = tool
+        self.args = args
+
+    def compose(self) -> ComposeResult:
+        args_str = json.dumps(self.args, ensure_ascii=False)
+        with Vertical(id="doom-dialog", align="center"):
+            yield Static("Doom Loop Detected!", id="title")
+            yield Static(f"Tool: {self.tool}")
+            yield Static("Same arguments called 3 times.")
+            yield Static(f"Args: {args_str}", id="args")
+            with Horizontal(id="buttons"):
+                yield Button("Once", id="once", variant="primary")
+                yield Button("Always", id="always", variant="warning")
+                yield Button("Reject", id="reject", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
 
 
 class ForensicsTuiApp(App):
@@ -233,6 +273,7 @@ class ForensicsTuiApp(App):
         self.current_conv_index = 0
         self.models: list[Any] = []
         self.loaded_model_path: str | None = None
+        self.loaded_engine_key: str | None = None
         self.loaded_model: Any = None
         self.generation_config_factory: Any = None
         self.active_worker: Worker | None = None
@@ -264,6 +305,7 @@ class ForensicsTuiApp(App):
                         yield Button("New", id="new", variant="primary")
                         yield Button("Params", id="params")
                         yield Button("Copy", id="copy")
+                    yield Button("Delete", id="delete", variant="error")
                     yield ListView(id="conv-list")
                 with Vertical(id="middle"):
                     yield Static("Agent Chat", classes="title")
@@ -322,6 +364,18 @@ class ForensicsTuiApp(App):
         self.conversations.append(conv)
         self._save_conversations()
         return len(self.conversations) - 1
+
+    def _delete_conversation(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self.conversations):
+            return
+        if len(self.conversations) == 1:
+            self.notify("Cannot delete the last conversation", severity="warning")
+            return
+        self.conversations.pop(idx)
+        self._save_conversations()
+        self.current_conv_index = min(idx, len(self.conversations) - 1)
+        self._refresh_conversation_list()
+        self._select_conversation(self.current_conv_index)
 
     def _refresh_conversation_list(self) -> None:
         view = self.query_one("#conv-list", ListView)
@@ -406,12 +460,22 @@ class ForensicsTuiApp(App):
 
     def _ensure_model_loaded(self, selected_path: Path) -> None:
         current = str(selected_path.resolve())
-        if self.loaded_model is not None and self.loaded_model_path == current:
+        engine_key = f"{self.config.engine}:{self.config.llama_cpp_url}:{self.config.llama_cpp_model}"
+        if self.loaded_model is not None and self.loaded_model_path == current and self.loaded_engine_key == engine_key:
             return
-        model, generation_config_factory = load_local_model(selected_path)
+        if self.config.engine == "llamacpp":
+            model, generation_config_factory = load_local_model(
+                None,
+                engine="llamacpp",
+                llama_cpp_url=self.config.llama_cpp_url,
+                llama_cpp_model=self.config.llama_cpp_model,
+            )
+        else:
+            model, generation_config_factory = load_local_model(selected_path)
         self.loaded_model = model
         self.generation_config_factory = generation_config_factory
         self.loaded_model_path = current
+        self.loaded_engine_key = engine_key
 
     @on(Button.Pressed, "#new")
     def _new_button(self) -> None:
@@ -424,6 +488,10 @@ class ForensicsTuiApp(App):
     @on(Button.Pressed, "#copy")
     def _copy_button(self) -> None:
         self.action_copy_card()
+
+    @on(Button.Pressed, "#delete")
+    def _delete_button(self) -> None:
+        self._delete_conversation(self.current_conv_index)
 
     @on(Button.Pressed, "#run")
     def _run_button(self) -> None:
@@ -575,6 +643,15 @@ class ForensicsTuiApp(App):
             focus["output_preview"] = output[:500]
         return "Observation\n" + json.dumps(focus, ensure_ascii=False, indent=2)
 
+    def _show_doom_loop_warning(self, tool: str, args: dict) -> None:
+        self.push_screen(DoomLoopModal(tool, args), self._on_doom_loop_dismiss)
+
+    def _on_doom_loop_dismiss(self, choice: str | None) -> None:
+        self._notify_doom_loop_choice(choice or "once")
+
+    def _notify_doom_loop_choice(self, choice: str) -> None:
+        trigger_doom_loop_choice(choice)
+
     def _event(self, event: dict[str, Any]) -> None:
         kind = str(event.get("type", ""))
         iteration = event.get("iteration", "?")
@@ -636,13 +713,25 @@ class ForensicsTuiApp(App):
             answer = str(event.get("answer", ""))
             self.current_run_had_final_event = True
             self.call_from_thread(self._mount_card, "assistant", f"Assistant (final)\n{answer}")
+            return
+        if kind == "doom_loop_warning":
+            tool = event.get("tool", "")
+            args = event.get("args", {})
+            self.call_from_thread(self._show_doom_loop_warning, tool, args)
+            return
 
     def _run_impl(self, msg: str) -> None:
         started = time.perf_counter()
         try:
-            selected = self._resolve_model()
-            self.call_from_thread(self._mount_status_card, "system", f"Model: {selected.name}")
-            self._ensure_model_loaded(selected.path)
+            if self.config.engine == "llamacpp":
+                selected_name = self.config.llama_cpp_model
+                self.call_from_thread(self._mount_status_card, "system", f"Model: {selected_name}")
+                self._ensure_model_loaded(Path(""))
+            else:
+                selected = self._resolve_model()
+                selected_name = selected.name
+                self.call_from_thread(self._mount_status_card, "system", f"Model: {selected_name}")
+                self._ensure_model_loaded(selected.path)
             if self.config.turboquant:
                 patch_mlx_lm_prompt_cache_with_turboquant(r_bits=self.config.tq_r_bits, theta_bits=self.config.tq_theta_bits)
                 self.call_from_thread(self._mount_status_card, "system", "TurboQuant enabled")
@@ -676,6 +765,7 @@ class ForensicsTuiApp(App):
                 compress_observations=self.config.compress_observations,
                 transcript_window=self.config.transcript_window,
                 multi_tool=self.config.multi_tool,
+                use_chat=self.config.use_chat,
             )
             elapsed = round(time.perf_counter() - started, 3)
             if self.cancel_requested or result.answer == "cancelled":

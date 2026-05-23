@@ -1814,6 +1814,7 @@ source = { editable = "." }
 dependencies = [
     { name = "effgen", extra = ["mlx"] },
     { name = "nicegui" },
+    { name = "requests" },
     { name = "rich" },
     { name = "textual" },
 ]
@@ -1832,6 +1833,7 @@ dev = [
 requires-dist = [
     { name = "effgen", extras = ["mlx"] },
     { name = "nicegui", specifier = ">=2.0" },
+    { name = "requests" },
     { name = "rich" },
     { name = "textual" },
     { name = "turboquant-mlx", marker = "extra == 'turboquant'", git = "https://github.com/DeadByDawn101/turboquant-mlx.git?rev=v2.0.0" },
