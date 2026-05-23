@@ -227,8 +227,9 @@ def read_skill_resource(
     skill = catalog.by_name().get(skill_name)
     if skill is None:
         return {"ok": False, "error": f"Unknown skill: {skill_name}"}
-    candidate = (skill.skill_dir / relative_path).resolve()
-    if candidate != skill.skill_dir and skill.skill_dir not in candidate.parents:
+    skill_dir_resolved = skill.skill_dir.resolve()
+    candidate = (skill_dir_resolved / relative_path).resolve()
+    if candidate != skill_dir_resolved and skill_dir_resolved not in candidate.parents:
         return {"ok": False, "error": f"Path escapes skill directory: {relative_path}"}
     if not candidate.exists() or not candidate.is_file():
         return {"ok": False, "error": f"Skill resource not found: {relative_path}"}

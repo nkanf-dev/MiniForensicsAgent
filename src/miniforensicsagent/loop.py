@@ -36,6 +36,7 @@ class ToolCallRecord:
 
 
 _doom_loop_whitelist: dict[tuple[str, frozenset], float] = {}
+_doom_loop_whitelist_lock = threading.Lock()
 _doom_loop_waiter: "DoomLoopWaiter | None" = None
 _doom_loop_global_callback: "Callable[[str], None] | None" = None
 
@@ -67,8 +68,6 @@ class DoomLoopWaiter:
         self._choice = choice
         if self._event:
             self._event.set()
-        if _doom_loop_global_callback:
-            _doom_loop_global_callback(choice)
 
 
 def _build_args_frozen(args: dict) -> frozenset:
@@ -84,36 +83,42 @@ def _load_whitelist() -> None:
         try:
             data = json.loads(path.read_text())
             now = time.time()
-            _doom_loop_whitelist = {
-                (k[0], frozenset(k[1])): v
-                for k, v in data.items()
-                if now - v < DOOM_LOOP_WHITELIST_DURATION_SECONDS
-            }
+            with _doom_loop_whitelist_lock:
+                _doom_loop_whitelist = {
+                    (k[0], frozenset(k[1])): v
+                    for k, v in data.items()
+                    if now - v < DOOM_LOOP_WHITELIST_DURATION_SECONDS
+                }
         except (json.JSONDecodeError, ValueError):
-            _doom_loop_whitelist = {}
+            with _doom_loop_whitelist_lock:
+                _doom_loop_whitelist = {}
     else:
-        _doom_loop_whitelist = {}
+        with _doom_loop_whitelist_lock:
+            _doom_loop_whitelist = {}
 
 
 def _save_whitelist() -> None:
     path = Path(DOOM_LOOP_WHITELIST_FILE)
-    data = {list(k): v for k, v in _doom_loop_whitelist.items()}
-    path.write_text(json.dumps(data))
+    with _doom_loop_whitelist_lock:
+        data = {list(k): v for k, v in _doom_loop_whitelist.items()}
+    path.write_text(json.dumps(data), encoding='utf-8')
 
 
 def _is_whitelisted(name: str, args: dict) -> bool:
     key = (name, _build_args_frozen(args))
-    if key not in _doom_loop_whitelist:
-        return False
-    if time.time() - _doom_loop_whitelist[key] > DOOM_LOOP_WHITELIST_DURATION_SECONDS:
-        del _doom_loop_whitelist[key]
-        return False
-    return True
+    with _doom_loop_whitelist_lock:
+        if key not in _doom_loop_whitelist:
+            return False
+        if time.time() - _doom_loop_whitelist[key] > DOOM_LOOP_WHITELIST_DURATION_SECONDS:
+            del _doom_loop_whitelist[key]
+            return False
+        return True
 
 
 def _add_to_whitelist(name: str, args: dict) -> None:
     key = (name, _build_args_frozen(args))
-    _doom_loop_whitelist[key] = time.time()
+    with _doom_loop_whitelist_lock:
+        _doom_loop_whitelist[key] = time.time()
     _save_whitelist()
 
 
@@ -133,9 +138,10 @@ def _check_doom_loop(name: str, args: dict, recent_calls: list[ToolCallRecord]) 
 def _cleanup_expired_entries(recent_calls: list[ToolCallRecord]) -> list[ToolCallRecord]:
     now = time.time()
     cutoff = now - DOOM_LOOP_WINDOW_SECONDS
-    expired = [k for k, v in _doom_loop_whitelist.items() if now - v > DOOM_LOOP_WHITELIST_DURATION_SECONDS]
-    for k in expired:
-        del _doom_loop_whitelist[k]
+    with _doom_loop_whitelist_lock:
+        expired = [k for k, v in _doom_loop_whitelist.items() if now - v > DOOM_LOOP_WHITELIST_DURATION_SECONDS]
+        for k in expired:
+            del _doom_loop_whitelist[k]
     if expired:
         _save_whitelist()
     return [r for r in recent_calls if r.timestamp > cutoff]
@@ -271,7 +277,7 @@ def extract_tagged_json(text: str, tag: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def extract_first_json_object(text: str) -> dict[str, Any]:
+def extract_first_json_object(text: str) -> dict[str, Any] | None:
     tagged_tool = extract_tagged_json(text, "tool_call")
     if tagged_tool:
         return tagged_tool
@@ -290,7 +296,7 @@ def extract_first_json_object(text: str) -> dict[str, Any]:
             continue
         if isinstance(parsed, dict):
             return parsed
-    raise ValueError(f"No JSON object found in model output: {text[:300]}")
+    return None
 
 
 def extract_all_tool_calls(text: str) -> list[dict[str, Any]]:
@@ -731,7 +737,15 @@ def run_loop(
 
         # --- Single-tool / plan / final path ---
         try:
-            response = normalize_response(extract_first_json_object(raw))
+            response = extract_first_json_object(raw)
+            if response is None:
+                turn["observations"] = [{"ok": False, "error": "Output was not a valid tool_call/final JSON block."}]
+                transcript.append(turn)
+                _update_tool_stats(running_tool_stats, turn)
+                if compress_observations and len(transcript) >= 2:
+                    compress_turn(transcript[-2])
+                continue
+            response = normalize_response(response)
         except Exception:
             turn["observations"] = [{"ok": False, "error": "Output was not a valid tool_call/final JSON block."}]
             transcript.append(turn)
@@ -822,6 +836,16 @@ def run_loop(
         if _check_doom_loop(name, args, recent_tool_calls):
             choice = _trigger_doom_loop_wait(name, args, iteration, event_callback)
             if choice == "reject":
+                observation = {"ok": True, "output": "", "skipped": True}
+                turn["observations"] = [observation]
+                if event_callback is not None:
+                    event_callback({"type": "observation", "iteration": iteration, "decision": response, "observation": observation})
+                transcript.append(turn)
+                if compress_observations and len(transcript) >= 2:
+                    compress_turn(transcript[-2])
+                continue
+            if choice == "always":
+                _add_to_whitelist(name, args)
                 observation = {"ok": True, "output": "", "skipped": True}
                 turn["observations"] = [observation]
                 if event_callback is not None:

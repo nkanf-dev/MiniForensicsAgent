@@ -44,8 +44,9 @@ The `normalize_response()` function (loop.py:164) determines response type:
 ## Doom loop detection
 - Trigger: same tool + same args called 3 times within 60 seconds
 - Warning event: `{"type": "doom_loop_warning", "tool": "...", "args": {...}, "choices": ["once", "always", "reject"]}`
-- Whitelist: `.mini_forensics_doom_whitelist.json` (5 min TTL, persisted)
+- Whitelist: `.mini_forensics_doom_whitelist.json` in working directory (5 min TTL, persisted)
 - Timeout: 30 seconds (auto-chooses "once")
+- `choice="always"` adds to whitelist via `_add_to_whitelist()` (loop.py:822-840)
 
 ### Doom Loop UI Dialogs
 - **TUI**: `DoomLoopModal` — Textual ModalScreen with Once/Always/Reject buttons

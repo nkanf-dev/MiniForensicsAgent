@@ -29,14 +29,15 @@ def discover_models(root: Path) -> list[LocalModel]:
     if not root.exists():
         return []
     models: list[LocalModel] = []
-    for candidate in sorted(root.rglob("*")):
+    for config_file in root.rglob("config.json"):
+        candidate = config_file.parent
         if looks_like_mlx_model(candidate):
             try:
                 display = str(candidate.relative_to(root))
             except ValueError:
                 display = candidate.name
             models.append(LocalModel(name=display, path=candidate))
-    return models
+    return sorted(models, key=lambda m: m.name)
 
 
 def format_models(models: Iterable[LocalModel]) -> str:

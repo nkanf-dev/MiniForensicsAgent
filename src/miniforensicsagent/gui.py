@@ -207,13 +207,23 @@ class SessionState:
 # UI Page
 # ---------------------------------------------------------------------------
 
+_state: "SessionState | None" = None
+
+
+def _get_state() -> SessionState:
+    global _state
+    if _state is None:
+        _state = SessionState()
+        _state.load_conversations()
+        if not _state.conversations:
+            _state.new_conversation()
+        _state.reload_models()
+    return _state
+
+
 @ui.page("/")
 def index_page() -> None:
-    state = SessionState()
-    state.load_conversations()
-    if not state.conversations:
-        state.new_conversation()
-    state.reload_models()
+    state = _get_state()
 
     # Refs to dynamic UI elements — populated during layout build below
     chat_column: ui.column | None = None

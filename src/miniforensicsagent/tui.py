@@ -648,8 +648,7 @@ class ForensicsTuiApp(App):
         self.push_screen(DoomLoopModal(tool, args), self._on_doom_loop_dismiss)
 
     def _on_doom_loop_dismiss(self, choice: str | None) -> None:
-        if choice:
-            self._notify_doom_loop_choice(choice)
+        self._notify_doom_loop_choice(choice or "once")
 
     def _notify_doom_loop_choice(self, choice: str) -> None:
         trigger_doom_loop_choice(choice)

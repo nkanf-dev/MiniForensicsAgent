@@ -41,6 +41,10 @@ def _translate_bash_command(command: str) -> str:
     command = command.strip()
     if command in BASH_TRANSLATIONS:
         return BASH_TRANSLATIONS[command]
+    if "|" in command:
+        parts = command.split("|")
+        translated_parts = [_translate_bash_command(p.strip()) for p in parts]
+        return " | ".join(translated_parts)
     parts = shlex.split(command)
     if not parts:
         return original
@@ -85,10 +89,15 @@ def run_tool(
             raw_path = "."
         path = Path(raw_path).expanduser()
         if not path.is_absolute():
-            if path.parts and path.parts[0] == workspace.name:
+            if path.parts and len(path.parts[0]) == 2 and path.parts[0].isalpha():
+                path = path.resolve() if path.exists() else Path(path.drive) / path
+            elif path.parts and path.parts[0] == workspace.name:
                 path = Path(*path.parts[1:]) if len(path.parts) > 1 else Path(".")
             path = workspace / path
-        resolved = path.resolve()
+        try:
+            resolved = path.resolve()
+        except OSError:
+            raise ValueError(f"Cannot resolve path: {path}")
         if resolved != workspace and workspace not in resolved.parents:
             raise ValueError(f"Path outside workspace: {resolved}")
         return resolved
@@ -232,7 +241,7 @@ def run_tool(
                         if item.is_file():
                             try:
                                 rel = item.resolve().relative_to(workspace)
-                                rel_str = "/".join(rel.parts)
+                                rel_str = rel.as_posix()
                                 matches.append(rel_str)
                             except ValueError:
                                 continue
