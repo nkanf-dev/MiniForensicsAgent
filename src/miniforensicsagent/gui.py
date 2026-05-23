@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 from nicegui import ui
 
-from .loop import run_loop
+from .loop import run_loop, set_doom_loop_global_callback, trigger_doom_loop_choice
 from .models import (
     DEFAULT_AGENT_WORKSPACE,
     DEFAULT_MODEL_ROOT,
@@ -66,6 +66,30 @@ def _fmt_time(ts: str) -> str:
         return datetime.fromisoformat(ts).strftime("%m-%d %H:%M")
     except Exception:
         return ts
+
+
+def _show_doom_loop_warning(tool: str, args: dict) -> None:
+    def _select(c: str):
+        _notify_doom_loop_choice(c)
+        dialog.close()
+
+    with ui.dialog() as dialog, ui.card():
+        ui.label("Doom Loop Detected!").classes("text-h6")
+        ui.label(f"Tool: {tool}")
+        ui.label("Same arguments called 3 times.")
+        args_str = json.dumps(args, ensure_ascii=False)
+        ui.label(f"Args: {args_str}")
+
+        with ui.row():
+            ui.button("Once", on_click=lambda: _select("once"))
+            ui.button("Always", on_click=lambda: _select("always")).classes("warning")
+            ui.button("Reject", on_click=lambda: _select("reject")).classes("negative")
+
+    dialog.open()
+
+
+def _notify_doom_loop_choice(choice: str) -> None:
+    trigger_doom_loop_choice(choice)
 
 
 def _parse_optional_int(raw: str) -> int | None:
@@ -459,6 +483,14 @@ def index_page() -> None:
             )
             return
 
+        if kind == "doom_loop_warning":
+            tool = event.get("tool", "")
+            args = event.get("args", {})
+            state.ui_queue.put(
+                lambda t=tool, a=args: _show_doom_loop_warning(t, a)
+            )
+            return
+
     # ---------------------------------------------------------------
     # Run / stop
     # ---------------------------------------------------------------
@@ -792,5 +824,6 @@ def index_page() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    set_doom_loop_global_callback(_notify_doom_loop_choice)
     ui.run(title="MiniForensicsAgent", port=8090, reload=False)
     return 0

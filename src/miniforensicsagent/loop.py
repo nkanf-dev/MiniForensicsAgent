@@ -37,6 +37,18 @@ class ToolCallRecord:
 
 _doom_loop_whitelist: dict[tuple[str, frozenset], float] = {}
 _doom_loop_waiter: "DoomLoopWaiter | None" = None
+_doom_loop_global_callback: "Callable[[str], None] | None" = None
+
+
+def set_doom_loop_global_callback(cb: "Callable[[str], None] | None") -> None:
+    global _doom_loop_global_callback
+    _doom_loop_global_callback = cb
+
+
+def trigger_doom_loop_choice(choice: str) -> None:
+    global _doom_loop_global_callback
+    if _doom_loop_global_callback:
+        _doom_loop_global_callback(choice)
 
 
 class DoomLoopWaiter:
@@ -55,6 +67,8 @@ class DoomLoopWaiter:
         self._choice = choice
         if self._event:
             self._event.set()
+        if _doom_loop_global_callback:
+            _doom_loop_global_callback(choice)
 
 
 def _build_args_frozen(args: dict) -> frozenset:

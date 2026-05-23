@@ -17,7 +17,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Input, Label, ListItem, ListView, Select, Static
 from textual.worker import Worker
 
-from .loop import run_loop
+from .loop import run_loop, set_doom_loop_global_callback, trigger_doom_loop_choice
 from .models import (
     DEFAULT_AGENT_WORKSPACE,
     DEFAULT_MODEL_ROOT,
@@ -187,6 +187,28 @@ class ParamsModal(ModalScreen[dict[str, Any] | None]):
         self.dismiss(payload)
 
 
+class DoomLoopModal(ModalScreen[str]):
+    def __init__(self, tool: str, args: dict):
+        super().__init__()
+        self.tool = tool
+        self.args = args
+
+    def compose(self) -> ComposeResult:
+        args_str = json.dumps(self.args, ensure_ascii=False)
+        with Vertical(id="doom-dialog", align="center"):
+            yield Static("Doom Loop Detected!", id="title")
+            yield Static(f"Tool: {self.tool}")
+            yield Static("Same arguments called 3 times.")
+            yield Static(f"Args: {args_str}", id="args")
+            with Horizontal(id="buttons"):
+                yield Button("Once", id="once", variant="primary")
+                yield Button("Always", id="always", variant="warning")
+                yield Button("Reject", id="reject", variant="error")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
+
+
 class ForensicsTuiApp(App):
     CSS = """
     #root { height: 1fr; }
@@ -311,6 +333,7 @@ class ForensicsTuiApp(App):
         self._refresh_right_panels()
         self._mount_status_card("system", "Ready.")
         self._mount_status_card("system", "Tip: focus a card and press c to copy text.")
+        set_doom_loop_global_callback(self._notify_doom_loop_choice)
 
     def _reload_models(self) -> None:
         root = Path(self.config.model_root).expanduser().resolve()
@@ -621,6 +644,16 @@ class ForensicsTuiApp(App):
             focus["output_preview"] = output[:500]
         return "Observation\n" + json.dumps(focus, ensure_ascii=False, indent=2)
 
+    def _show_doom_loop_warning(self, tool: str, args: dict) -> None:
+        self.push_screen(DoomLoopModal(tool, args), self._on_doom_loop_dismiss)
+
+    def _on_doom_loop_dismiss(self, choice: str | None) -> None:
+        if choice:
+            self._notify_doom_loop_choice(choice)
+
+    def _notify_doom_loop_choice(self, choice: str) -> None:
+        trigger_doom_loop_choice(choice)
+
     def _event(self, event: dict[str, Any]) -> None:
         kind = str(event.get("type", ""))
         iteration = event.get("iteration", "?")
@@ -682,6 +715,12 @@ class ForensicsTuiApp(App):
             answer = str(event.get("answer", ""))
             self.current_run_had_final_event = True
             self.call_from_thread(self._mount_card, "assistant", f"Assistant (final)\n{answer}")
+            return
+        if kind == "doom_loop_warning":
+            tool = event.get("tool", "")
+            args = event.get("args", {})
+            self.call_from_thread(self._show_doom_loop_warning, tool, args)
+            return
 
     def _run_impl(self, msg: str) -> None:
         started = time.perf_counter()
